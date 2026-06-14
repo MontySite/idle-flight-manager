@@ -22,6 +22,46 @@
     reputationStart: 1.0,
     reputationDrift: 0.0001,
     minDistanceKmForDemand: 0,
+
+    co2KgPerKgFuel: 3.16,
+    co2PricePerTonne: 25,
+
+    pilotHiringCost: 5000,
+    cabinCrewHiringCost: 2000,
+    groundCrewHiringCost: 1000,
+    pilotSalaryPerMonth: 8000,
+    cabinCrewSalaryPerMonth: 3000,
+    groundCrewSalaryPerMonth: 2000,
+    pilotPerPlane: 2,
+    cabinCrewPerSeats: 50,
+    groundCrewPerPlane: 1,
+
+    aCheckFlightHours: 500,
+    aCheckDowntimeHours: 4,
+    aCheckCostMultiplier: 20,
+    aCheckHealthRestore: 20,
+    cCheckFlightHours: 5000,
+    cCheckDowntimeHours: 48,
+    cCheckCostMultiplier: 80,
+    lineMaintCostMultiplier: 5,
+    lineMaintHealthRestore: 5,
+    healthFull: 100,
+
+    fareMultiplierByClass: { economy: 1.0, business: 2.5, first: 5.0 },
+    seatConfigDefault: { economy: 0.80, business: 0.15, first: 0.05 },
+
+    marketingDurationHours: 72,
+    marketingDemandMult: 1.20,
+    marketingCostPerRegion: 50000,
+    marketingMaxActive: 5,
+
+    fuelPriceMeanReversion: 0.02,
+    fuelPriceVolatility: 0.02,
+    fuelPriceMin: 0.30,
+    fuelPriceMax: 2.50,
+
+    initialFuelKg: 5000,
+    initialCo2Tonnes: 2,
   };
 
   const AIRPORT_PROFILE = {

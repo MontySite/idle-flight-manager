@@ -88,8 +88,11 @@
     reputation: 1.0,
     gameTimeHours: 0,
     fuelInventoryKg: 0,
+    fuelPriceUsdPerKg: 0.80,
     co2InventoryTonnes: 0,
     personnel: { pilots: 0, cabinCrew: 0, groundCrew: 0 },
+    campaigns: [],
+    nextCampaignId: 1,
     events: [],
     stats: { paxCarried: 0, flightsDone: 0 },
     lastSaved: Date.now(),
@@ -177,6 +180,8 @@
     if (ECON_DATA.isGrounded(plane)) return { ...empty, tier: variant.tier, grounded: true, groundedReason: "low health", efficiency: ECON_DATA.efficiency(plane) };
     const km = haversineKm(a, b);
     if (km > variant.rangeKm) return { ...empty, km, tier: variant.tier, grounded: true, groundedReason: "out of range" };
+    const realisticGate = realisticGroundedReason(plane);
+    if (realisticGate) return { ...empty, km, tier: variant.tier, grounded: true, groundedReason: realisticGate, efficiency: ECON_DATA.efficiency(plane) };
 
     const farePerKm = (typeof route.farePerPaxPerKm === "number") ? route.farePerPaxPerKm : ECON_DATA.ECON.fareUsdPerPaxPerKm;
     const cycleHours = ECON_DATA.cycleHours(km, variant, a, b, state.routes);
@@ -188,14 +193,26 @@
     const priceMult = ECON_DATA.priceElasticity(farePerKm);
     const repMult = state.reputation;
     const hubBonus = ECON_DATA.computeHubBonus(a, b, state.routes);
-    const paxWilling = baseDemand * seasonal * eventMult * priceMult * repMult * (1 + hubBonus);
+    let marketingMult = 1;
+    if (state.mode === "realistic" && state.campaigns) {
+      const aRegion = ECON_DATA.countryRegion[a.country];
+      const bRegion = ECON_DATA.countryRegion[b.country];
+      for (const c of state.campaigns) {
+        if (aRegion === c.region || bRegion === c.region) marketingMult *= c.demandMult ?? 1;
+      }
+    }
+    const paxWilling = baseDemand * seasonal * eventMult * priceMult * repMult * (1 + hubBonus) * marketingMult;
 
     const efficiency = ECON_DATA.efficiency(plane);
     const seatsEffective = variant.seats * efficiency;
     const paxPerFlight = Math.max(0, Math.min(seatsEffective, paxWilling));
     const loadFactor = seatsEffective > 0 ? paxPerFlight / seatsEffective : 0;
 
-    const farePerPax = farePerKm * km;
+    const cfg = plane.seatConfig || ECON_DATA.ECON.seatConfigDefault;
+    const fareMult = (state.mode === "realistic")
+      ? (cfg.economy * 1.0 + cfg.business * 2.5 + cfg.first * 5.0)
+      : 1.0;
+    const farePerPax = farePerKm * km * fareMult;
     const revenuePerFlight = paxPerFlight * farePerPax;
     const revenuePerSec = flightsPerSec * revenuePerFlight;
 
@@ -217,7 +234,7 @@
       costBreakdown: { fuel, nav, crew, maint, insurance, landing },
       costPerSec, profitPerSec,
       tier: variant.tier, grounded: false, groundedReason: "",
-      hubBonus, seasonal, eventMult, priceMult, repMult,
+      hubBonus, seasonal, eventMult, priceMult, repMult, marketingMult,
       loadFactor, efficiency, fare: farePerKm,
     };
   }
@@ -242,11 +259,25 @@
     state.stats.flightsDone += eco.flightsPerSec * dtSec;
     const plane = getPlane(route.planeId);
     if (plane) {
-      plane.ageHours += eco.cycleHours * eco.flightsPerSec * dtSec;
+      const flightHoursDelta = eco.cycleHours * eco.flightsPerSec * dtSec;
+      plane.ageHours += flightHoursDelta;
+      plane.hoursSinceACheck = (plane.hoursSinceACheck || 0) + flightHoursDelta;
+      plane.hoursSinceCCheck = (plane.hoursSinceCCheck || 0) + flightHoursDelta;
       const wear = (ECON_DATA.ECON.wearPerFlightByTier[eco.tier] || 0.1) * eco.flightsPerSec * dtSec;
       plane.health = Math.max(0, plane.health - wear);
+      if (state.mode === "realistic") {
+        const fuelKg = eco.km * variant_fuelKgPerKm(plane);
+        state.fuelInventoryKg = Math.max(0, state.fuelInventoryKg - fuelKg * eco.flightsPerSec * dtSec);
+        const co2T = (fuelKg * ECON_DATA.ECON.co2KgPerKgFuel) / 1000;
+        state.co2InventoryTonnes = Math.max(0, state.co2InventoryTonnes - co2T * eco.flightsPerSec * dtSec);
+      }
     }
     return eco;
+  }
+
+  function variant_fuelKgPerKm(plane) {
+    const v = PLANE_DATA.variantById(plane.variantId);
+    return v ? v.fuelKgPerKm : 0;
   }
 
   function applyReputationDrift(dtSec) {
@@ -313,9 +344,19 @@
       if (typeof state.nextPlaneId !== "number") state.nextPlaneId = 1;
       if (typeof state.reputation !== "number") state.reputation = 1.0;
       if (!state.personnel) state.personnel = { pilots: 0, cabinCrew: 0, groundCrew: 0 };
+      if (typeof state.fuelInventoryKg !== "number") state.fuelInventoryKg = 0;
+      if (typeof state.co2InventoryTonnes !== "number") state.co2InventoryTonnes = 0;
+      if (typeof state.fuelPriceUsdPerKg !== "number") state.fuelPriceUsdPerKg = 0.80;
+      if (!Array.isArray(state.campaigns)) state.campaigns = [];
+      if (typeof state.nextCampaignId !== "number") state.nextCampaignId = 1;
       if (!Array.isArray(state.events)) state.events = [];
       if (typeof state.nextEventId !== "number") state.nextEventId = 1;
       if (!state.stats) state.stats = { paxCarried: 0, flightsDone: 0 };
+      for (const p of state.planes) {
+        if (typeof p.hoursSinceACheck !== "number") p.hoursSinceACheck = 0;
+        if (typeof p.hoursSinceCCheck !== "number") p.hoursSinceCCheck = 0;
+        if (!p.seatConfig) p.seatConfig = { ...ECON_DATA.ECON.seatConfigDefault };
+      }
       for (const r of state.routes) {
         if (typeof r.tier !== "undefined" && !r.planeId) r.tier = r.tier;
       }
@@ -409,7 +450,9 @@
       variantId,
       ageHours: 0,
       health: 100,
-      seatConfig: { economy: 0.80, business: 0.15, first: 0.05 },
+      hoursSinceACheck: 0,
+      hoursSinceCCheck: 0,
+      seatConfig: { ...ECON_DATA.ECON.seatConfigDefault },
       assignedRouteId: null,
     };
     state.planes.push(plane);
@@ -693,6 +736,187 @@
     }
   }
 
+  function initRealisticInventoryIfNeeded() {
+    if (state.fuelPriceUsdPerKg == null) state.fuelPriceUsdPerKg = ECON_DATA.ECON.fuelPriceUsdPerKg;
+    if (!state.personnel) state.personnel = { pilots: 0, cabinCrew: 0, groundCrew: 0 };
+    if (state.co2InventoryTonnes == null) state.co2InventoryTonnes = ECON_DATA.ECON.initialCo2Tonnes;
+    if (state.fuelInventoryKg == null) state.fuelInventoryKg = ECON_DATA.ECON.initialFuelKg;
+    if (!Array.isArray(state.campaigns)) state.campaigns = [];
+  }
+
+  function updateFuelPrice(dtGameHours) {
+    if (state.mode !== "realistic") {
+      state.fuelPriceUsdPerKg = ECON_DATA.ECON.fuelPriceUsdPerKg;
+      return;
+    }
+    const mult = currentFuelMult();
+    const target = ECON_DATA.ECON.fuelPriceUsdPerKg * mult;
+    const drift = (target - state.fuelPriceUsdPerKg) * ECON_DATA.ECON.fuelPriceMeanReversion;
+    const noise = (Math.random() - 0.5) * state.fuelPriceUsdPerKg * ECON_DATA.ECON.fuelPriceVolatility;
+    const next = state.fuelPriceUsdPerKg + drift + noise;
+    state.fuelPriceUsdPerKg = Math.max(ECON_DATA.ECON.fuelPriceMin, Math.min(ECON_DATA.ECON.fuelPriceMax, next));
+  }
+
+  function buyFuel(kg) {
+    if (kg <= 0) return;
+    const cost = kg * state.fuelPriceUsdPerKg;
+    if (state.cash < cost) {
+      toast(`Not enough cash to buy ${fmtNum(kg)} kg fuel`, "bad");
+      return;
+    }
+    state.cash -= cost;
+    state.fuelInventoryKg += kg;
+    toast(`Bought ${fmtNum(kg)} kg fuel for ${fmtMoney(cost)} (${fmtMoney(state.fuelPriceUsdPerKg)}/kg)`, "good");
+    save();
+    renderAll();
+  }
+
+  function buyCO2(tonnes) {
+    if (tonnes <= 0) return;
+    const cost = tonnes * ECON_DATA.ECON.co2PricePerTonne;
+    if (state.cash < cost) {
+      toast(`Not enough cash to buy ${fmtNum(tonnes)}t CO2`, "bad");
+      return;
+    }
+    state.cash -= cost;
+    state.co2InventoryTonnes += tonnes;
+    toast(`Bought ${fmtNum(tonnes)}t CO2 allowances for ${fmtMoney(cost)}`, "good");
+    save();
+    renderAll();
+  }
+
+  function planePersonnelRequirements(plane) {
+    if (!plane) return { pilots: 0, cabinCrew: 0, groundCrew: 0 };
+    const variant = PLANE_DATA.variantById(plane.variantId);
+    if (!variant) return { pilots: 0, cabinCrew: 0, groundCrew: 0 };
+    return {
+      pilots: ECON_DATA.ECON.pilotPerPlane,
+      cabinCrew: Math.max(1, Math.ceil(variant.seats / ECON_DATA.ECON.cabinCrewPerSeats)),
+      groundCrew: ECON_DATA.ECON.groundCrewPerPlane,
+    };
+  }
+
+  function hirePersonnel(kind, count) {
+    if (count <= 0) return;
+    const costKey = kind === "pilots" ? "pilotHiringCost" : kind === "cabinCrew" ? "cabinCrewHiringCost" : "groundCrewHiringCost";
+    const cost = count * ECON_DATA.ECON[costKey];
+    if (state.cash < cost) {
+      toast(`Not enough cash to hire ${count} ${kind}`, "bad");
+      return;
+    }
+    state.cash -= cost;
+    state.personnel[kind] += count;
+    toast(`Hired ${count} ${kind} for ${fmtMoney(cost)}`, "good");
+    save();
+    renderAll();
+  }
+
+  function monthlySalaries() {
+    return ECON_DATA.ECON.pilotSalaryPerMonth * state.personnel.pilots
+         + ECON_DATA.ECON.cabinCrewSalaryPerMonth * state.personnel.cabinCrew
+         + ECON_DATA.ECON.groundCrewSalaryPerMonth * state.personnel.groundCrew;
+  }
+
+  function applySalaries(dtGameHours) {
+    const perHour = monthlySalaries() / (30 * 24);
+    state.cash -= perHour * dtGameHours;
+  }
+
+  function doMaintenanceCheck(planeId, kind) {
+    const plane = getPlane(planeId);
+    if (!plane) return;
+    const variant = PLANE_DATA.variantById(plane.variantId);
+    if (!variant) return;
+    const E = ECON_DATA.ECON;
+    const hourlyMaint = E.maintenanceUsdPerHour[variant.tier];
+    if (kind === "a-check") {
+      const cost = hourlyMaint * E.aCheckCostMultiplier;
+      if (state.cash < cost) { toast(`Need ${fmtMoney(cost)} for A-check`, "bad"); return; }
+      state.cash -= cost;
+      plane.hoursSinceACheck = 0;
+      plane.health = Math.min(100, plane.health + E.aCheckHealthRestore);
+      toast(`A-check done on ${variant.name} for ${fmtMoney(cost)}, +${E.aCheckHealthRestore}hp`, "good");
+    } else if (kind === "c-check") {
+      const cost = hourlyMaint * E.cCheckCostMultiplier;
+      if (state.cash < cost) { toast(`Need ${fmtMoney(cost)} for C-check`, "bad"); return; }
+      state.cash -= cost;
+      plane.hoursSinceCCheck = 0;
+      plane.hoursSinceACheck = 0;
+      plane.health = E.healthFull;
+      toast(`C-check done on ${variant.name} for ${fmtMoney(cost)}, plane fully restored`, "good");
+    } else if (kind === "line") {
+      const cost = hourlyMaint * E.lineMaintCostMultiplier;
+      if (state.cash < cost) { toast(`Need ${fmtMoney(cost)} for line maintenance`, "bad"); return; }
+      state.cash -= cost;
+      plane.health = Math.min(100, plane.health + E.lineMaintHealthRestore);
+      toast(`Line maintenance on ${variant.name} for ${fmtMoney(cost)}, +${E.lineMaintHealthRestore}hp`, "good");
+    }
+    save();
+    renderAll();
+  }
+
+  function setSeatConfig(planeId, klass, value) {
+    const plane = getPlane(planeId);
+    if (!plane) return;
+    plane.seatConfig[klass] = Math.max(0, Math.min(1, value));
+    const sum = plane.seatConfig.economy + plane.seatConfig.business + plane.seatConfig.first;
+    if (sum > 0 && Math.abs(sum - 1) > 0.01) {
+      const scale = 1 / sum;
+      plane.seatConfig.economy *= scale;
+      plane.seatConfig.business *= scale;
+      plane.seatConfig.first *= scale;
+    }
+    save();
+    renderAll();
+  }
+
+  function startMarketingCampaign(region) {
+    const E = ECON_DATA.ECON;
+    if (state.campaigns.length >= E.marketingMaxActive) {
+      toast(`Max ${E.marketingMaxActive} active campaigns`, "warn");
+      return;
+    }
+    const cost = E.marketingCostPerRegion;
+    if (state.cash < cost) {
+      toast(`Need ${fmtMoney(cost)} for marketing in ${region}`, "bad");
+      return;
+    }
+    state.cash -= cost;
+    state.campaigns.push({
+      id: ++state.nextCampaignId,
+      region,
+      demandMult: E.marketingDemandMult,
+      durationHours: E.marketingDurationHours,
+      hoursRemaining: E.marketingDurationHours,
+    });
+    toast(`Marketing campaign started in ${region} for ${E.marketingDurationHours}h`, "good");
+    save();
+    renderAll();
+  }
+
+  function applyMarketingTick(dtGameHours) {
+    for (let i = state.campaigns.length - 1; i >= 0; i--) {
+      state.campaigns[i].hoursRemaining -= dtGameHours;
+      if (state.campaigns[i].hoursRemaining <= 0) {
+        const removed = state.campaigns.splice(i, 1)[0];
+        toast(`Marketing in ${removed.region} ended`, "good");
+      }
+    }
+  }
+
+  function realisticGroundedReason(plane) {
+    if (!plane) return "no plane";
+    if (state.mode !== "realistic") return null;
+    if (state.fuelInventoryKg <= 0) return "out of fuel";
+    if (state.co2InventoryTonnes <= 0) return "out of CO2";
+    const req = planePersonnelRequirements(plane);
+    if (state.personnel.pilots < req.pilots) return "need pilots";
+    if (state.personnel.cabinCrew < req.cabinCrew) return "need cabin crew";
+    if (state.personnel.groundCrew < req.groundCrew) return "need ground crew";
+    if (plane.hoursSinceCCheck >= ECON_DATA.ECON.cCheckFlightHours) return "C-check overdue";
+    return null;
+  }
+
   function toast(msg, kind) {
     const el = document.createElement("div");
     el.className = "toast" + (kind ? " " + kind : "");
@@ -750,8 +974,32 @@
       bodyEl.innerHTML = renderEventsPanel();
       return;
     }
+    if (panelMode === "resources") {
+      titleEl.textContent = "Resources";
+      bodyEl.innerHTML = renderResourcesPanel();
+      bindResourcesPanelEvents();
+      return;
+    }
     titleEl.textContent = "Welcome, CEO";
     bodyEl.innerHTML = renderWelcomePanel();
+  }
+
+  function bindResourcesPanelEvents() {
+    const body = $("panel-body");
+    body.querySelectorAll("[data-action]").forEach(el => {
+      el.addEventListener("click", () => {
+        const action = el.getAttribute("data-action");
+        if (action === "buy-fuel") {
+          buyFuel(parseFloat(el.getAttribute("data-kg")));
+        } else if (action === "buy-co2") {
+          buyCO2(parseFloat(el.getAttribute("data-tonnes")));
+        } else if (action === "hire") {
+          hirePersonnel(el.getAttribute("data-kind"), parseInt(el.getAttribute("data-count"), 10));
+        } else if (action === "start-campaign") {
+          startMarketingCampaign(el.getAttribute("data-region"));
+        }
+      });
+    });
   }
 
   function eventTargetLabel(ev) {
@@ -817,6 +1065,94 @@
             </span>
           </div>
         `).join("")}
+      </div>
+    `;
+  }
+
+  function renderResourcesPanel() {
+    const E = ECON_DATA.ECON;
+    const fuelPrice = state.fuelPriceUsdPerKg || E.fuelPriceUsdPerKg;
+    const fuelCrit = state.fuelInventoryKg < 100;
+    const co2Crit = state.co2InventoryTonnes < 0.1;
+    const paxPilotsReq = state.planes.filter(p => p.assignedRouteId).length * E.pilotPerPlane;
+    const paxCabinReq = state.planes.filter(p => p.assignedRouteId).reduce((sum, p) => {
+      const v = PLANE_DATA.variantById(p.variantId);
+      return sum + (v ? Math.max(1, Math.ceil(v.seats / E.cabinCrewPerSeats)) : 0);
+    }, 0);
+    const paxGroundReq = state.planes.filter(p => p.assignedRouteId).length * E.groundCrewPerPlane;
+    return `
+      <div class="panel-section">
+        <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">
+          Realistic-mode operations: fuel, CO2, crew, and marketing.
+        </p>
+      </div>
+      <div class="panel-section">
+        <h3>Fuel</h3>
+        <div class="kv"><span class="k">Inventory</span><span class="v ${fuelCrit ? "profit-neg" : ""}">${fmtNum(Math.round(state.fuelInventoryKg))} kg</span></div>
+        <div class="kv"><span class="k">Price</span><span class="v">${fmtMoney(fuelPrice)}/kg</span></div>
+        <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap;">
+          <button class="btn" data-action="buy-fuel" data-kg="1000">+1,000kg</button>
+          <button class="btn" data-action="buy-fuel" data-kg="10000">+10,000kg</button>
+          <button class="btn" data-action="buy-fuel" data-kg="100000">+100,000kg</button>
+        </div>
+      </div>
+      <div class="panel-section">
+        <h3>CO2 allowances</h3>
+        <div class="kv"><span class="k">Inventory</span><span class="v ${co2Crit ? "profit-neg" : ""}">${fmtNum(state.co2InventoryTonnes)} t</span></div>
+        <div class="kv"><span class="k">Price</span><span class="v">${fmtMoney(E.co2PricePerTonne)}/t</span></div>
+        <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap;">
+          <button class="btn" data-action="buy-co2" data-tonnes="1">+1t</button>
+          <button class="btn" data-action="buy-co2" data-tonnes="10">+10t</button>
+          <button class="btn" data-action="buy-co2" data-tonnes="100">+100t</button>
+        </div>
+      </div>
+      <div class="panel-section">
+        <h3>Personnel</h3>
+        <div class="kv"><span class="k">Pilots</span><span class="v">${state.personnel.pilots} <span style="color:var(--text-faint); font-size:11px;">(need ${paxPilotsReq})</span></span></div>
+        <div class="kv"><span class="k">Cabin crew</span><span class="v">${state.personnel.cabinCrew} <span style="color:var(--text-faint); font-size:11px;">(need ${paxCabinReq})</span></span></div>
+        <div class="kv"><span class="k">Ground crew</span><span class="v">${state.personnel.groundCrew} <span style="color:var(--text-faint); font-size:11px;">(need ${paxGroundReq})</span></span></div>
+        <div class="kv"><span class="k">Monthly salary</span><span class="v" style="color:var(--bad);">-${fmtMoney(monthlySalaries())}/mo</span></div>
+        <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap;">
+          <button class="btn" data-action="hire" data-kind="pilots" data-count="1">+1 Pilot</button>
+          <button class="btn" data-action="hire" data-kind="pilots" data-count="5">+5 Pilots</button>
+        </div>
+        <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+          <button class="btn" data-action="hire" data-kind="cabinCrew" data-count="1">+1 Cabin</button>
+          <button class="btn" data-action="hire" data-kind="cabinCrew" data-count="5">+5 Cabin</button>
+        </div>
+        <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap;">
+          <button class="btn" data-action="hire" data-kind="groundCrew" data-count="1">+1 Ground</button>
+          <button class="btn" data-action="hire" data-kind="groundCrew" data-count="3">+3 Ground</button>
+        </div>
+      </div>
+      <div class="panel-section">
+        <h3>Marketing campaigns</h3>
+        <p style="color:var(--text-dim); font-size:11px; margin:0 0 8px;">
+          Boosts demand ×${E.marketingDemandMult} for ${E.marketingDurationHours}h on chosen region.
+          Cost: ${fmtMoney(E.marketingCostPerRegion)}/campaign. Max ${E.marketingMaxActive} active.
+        </p>
+        ${state.campaigns.length === 0 ? `<div class="empty">No active campaigns.</div>` : state.campaigns.map(c => {
+          const pct = Math.max(0, Math.min(100, ((c.durationHours - c.hoursRemaining) / c.durationHours) * 100));
+          return `
+            <div class="event-card" style="border-left-color:var(--info);">
+              <div class="event-header">
+                <span class="event-icon" style="color:var(--info);">&#128227;</span>
+                <span class="event-label">Marketing</span>
+                <span class="event-target">${c.region}</span>
+              </div>
+              <div class="event-progress"><div class="event-progress-fill" style="width:${pct}%; background:var(--info);"></div></div>
+              <div class="event-meta"><span>${Math.max(0, Math.round(c.hoursRemaining))}h left</span><span>demand ${c.demandMult.toFixed(2)}×</span></div>
+            </div>
+          `;
+        }).join("")}
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:8px;">
+          <button class="btn" data-action="start-campaign" data-region="EU">EU</button>
+          <button class="btn" data-action="start-campaign" data-region="NA">NA</button>
+          <button class="btn" data-action="start-campaign" data-region="AS">AS</button>
+          <button class="btn" data-action="start-campaign" data-region="SA">SA</button>
+          <button class="btn" data-action="start-campaign" data-region="AF">AF</button>
+          <button class="btn" data-action="start-campaign" data-region="OC">OC</button>
+        </div>
       </div>
     `;
   }
@@ -1364,6 +1700,10 @@
         ? "Realistic mode: full simulation (fuel, CO2, personnel, maintenance)"
         : "Simplified mode: basic economy. Unlock Realistic at " + fmtMoney(UNLOCK_REALISTIC_AT) + " total earned.";
     }
+    const resBtn = $("btn-resources");
+    if (resBtn) {
+      resBtn.hidden = state.mode !== "realistic";
+    }
   }
 
   function renderAll() {
@@ -1442,19 +1782,24 @@
     const dtSec = TICK_MS / 1000;
     const dtGameHours = dtSec * ECON_DATA.ECON.gameSecondsPerGameHour;
     state.gameTimeHours += dtGameHours;
+    initRealisticInventoryIfNeeded();
+    updateFuelPrice(dtGameHours);
     for (const r of state.routes) simulateRoute(r, dtSec);
     applyEventTick(dtGameHours);
+    applyMarketingTick(dtGameHours);
     applyReputationDrift(dtSec);
+    if (state.mode === "realistic") applySalaries(dtGameHours);
     tryUnlockMediumAirports();
     tryUnlockRealisticMode();
     renderTopBar();
-    if (["hangar", "stats", "routes", "events"].includes(panelMode)) renderPanel();
+    if (["hangar", "stats", "routes", "events", "resources"].includes(panelMode)) renderPanel();
   }
 
   function bindTopBar() {
     $("btn-hangar").addEventListener("click", () => showPanel("hangar"));
     $("btn-routes").addEventListener("click", () => showPanel("routes"));
     $("btn-events").addEventListener("click", () => showPanel("events"));
+    $("btn-resources").addEventListener("click", () => showPanel("resources"));
     $("btn-stats").addEventListener("click", () => showPanel("stats"));
     $("btn-save").addEventListener("click", () => { save(); toast("Game saved", "good"); });
     $("mode-pill").addEventListener("click", openModeInfoModal);
@@ -1515,6 +1860,10 @@
         createEvent, applyEventTick, currentFuelPrice, currentFuelMult,
         GAME_MODES, modeConfig, tryUnlockRealisticMode, openModeInfoModal,
         openRealisticModePrompt, renderTopBar,
+        initRealisticInventoryIfNeeded, updateFuelPrice,
+        buyFuel, buyCO2, hirePersonnel, monthlySalaries,
+        doMaintenanceCheck, setSeatConfig, startMarketingCampaign,
+        applyMarketingTick, realisticGroundedReason, planePersonnelRequirements,
       };
     }
   }
