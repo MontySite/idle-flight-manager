@@ -190,6 +190,7 @@ button {
 .airport-marker:hover { transform: scale(1.4); }
 .airport-marker.large { background: var(--accent); }
 .airport-marker.medium { background: var(--info); }
+.airport-marker.small  { background: var(--warn); }
 .airport-marker.selected { background: var(--good); box-shadow: 0 0 0 4px var(--good-soft); }
 .airport-marker.locked { background: var(--text-faint); opacity: 0.5; }
 

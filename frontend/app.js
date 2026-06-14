@@ -16,6 +16,7 @@
 
   const UNLOCK_MEDIUM_AT = 50000;
   const UNLOCK_REALISTIC_AT = 5_000_000;
+  const UNLOCK_SMALL_AIRPORTS_AT = 1_000_000;
 
   const EVENT_TEMPLATES = [
     { type: "storm",          durationHours: 18,    demandMult: 0.40, appliesTo: "region",  baseProbPerGameHour: 0.040 },
@@ -314,9 +315,15 @@
   }
 
   function isAirportUnlocked(ap) {
+    if (!ap) return false;
     if (ap.type === "large_airport") return true;
     if (ap.type === "medium_airport") return state.mediumAirportsUnlocked;
+    if (ap.type === "small_airport") return state.smallAirportsUnlocked;
     return false;
+  }
+
+  function airportsBySize(size) {
+    return airports.filter(a => a.type === size);
   }
 
   function save() {
@@ -533,6 +540,17 @@
     if (state.totalEarned >= UNLOCK_MEDIUM_AT) {
       state.mediumAirportsUnlocked = true;
       toast(`Regional airports unlocked!`, "good");
+      save();
+      updateVisibleMarkers();
+      renderAll();
+    }
+  }
+
+  function tryUnlockSmallAirports() {
+    if (state.smallAirportsUnlocked) return;
+    if (state.totalEarned >= UNLOCK_SMALL_AIRPORTS_AT) {
+      state.smallAirportsUnlocked = true;
+      toast(`Small airports unlocked!`, "good");
       save();
       updateVisibleMarkers();
       renderAll();
@@ -1173,6 +1191,7 @@
         <h3>Goal</h3>
         <div class="kv"><span class="k">Build a global network</span><span class="v">∞</span></div>
         <div class="kv"><span class="k">Unlock regional airports</span><span class="v">${state.mediumAirportsUnlocked ? "✓" : fmtMoney(UNLOCK_MEDIUM_AT)}</span></div>
+        <div class="kv"><span class="k">Unlock small airports</span><span class="v">${state.smallAirportsUnlocked ? "✓" : fmtMoney(UNLOCK_SMALL_AIRPORTS_AT)}</span></div>
         <div class="kv"><span class="k">Unlock Realistic mode</span><span class="v">${state.realisticUnlocked ? "✓" : fmtMoney(UNLOCK_REALISTIC_AT)}</span></div>
         <div class="kv"><span class="k">Current cash</span><span class="v">${fmtMoney(state.cash)}</span></div>
         <div class="kv"><span class="k">Income / sec</span><span class="v">${fmtMoney(totalIncomePerSec())}</span></div>
@@ -1615,17 +1634,32 @@
     $("modal").classList.add("hidden");
   }
 
+  function airportSizeClass(ap) {
+    if (ap.type === "large_airport") return "large";
+    if (ap.type === "medium_airport") return "medium";
+    if (ap.type === "small_airport") return "small";
+    return "large";
+  }
+
+  function airportUnlockMilestone(ap) {
+    if (ap.type === "medium_airport") return fmtMoney(UNLOCK_MEDIUM_AT);
+    if (ap.type === "small_airport") return fmtMoney(UNLOCK_SMALL_AIRPORTS_AT);
+    return "0";
+  }
+
   function makeMarker(ap) {
+    const sizeCls = airportSizeClass(ap);
     const icon = L.divIcon({
       className: "",
-      html: `<div class="airport-marker ${ap.type === "large_airport" ? "large" : "medium"} ${isAirportUnlocked(ap) ? "" : "locked"}" title="${ap.id}"></div>`,
+      html: `<div class="airport-marker ${sizeCls} ${isAirportUnlocked(ap) ? "" : "locked"}" title="${ap.id}"></div>`,
       iconSize: [10, 10],
       iconAnchor: [5, 5],
     });
     const m = L.marker([ap.lat, ap.lon], { icon, title: `${ap.id} — ${ap.name}` });
     m.on("click", () => {
       if (!isAirportUnlocked(ap)) {
-        toast(`${ap.id} is a regional airport. Earn ${fmtMoney(UNLOCK_MEDIUM_AT)} to unlock.`, "warn");
+        const label = ap.type === "small_airport" ? "small airport" : "regional airport";
+        toast(`${ap.id} is a ${label}. Earn ${airportUnlockMilestone(ap)} to unlock.`, "warn");
         return;
       }
       showPanel("airport", { airportId: ap.id });
@@ -1790,6 +1824,7 @@
     applyReputationDrift(dtSec);
     if (state.mode === "realistic") applySalaries(dtGameHours);
     tryUnlockMediumAirports();
+    tryUnlockSmallAirports();
     tryUnlockRealisticMode();
     renderTopBar();
     if (["hangar", "stats", "routes", "events", "resources"].includes(panelMode)) renderPanel();
@@ -1864,6 +1899,7 @@
         buyFuel, buyCO2, hirePersonnel, monthlySalaries,
         doMaintenanceCheck, setSeatConfig, startMarketingCampaign,
         applyMarketingTick, realisticGroundedReason, planePersonnelRequirements,
+        tryUnlockSmallAirports, isAirportUnlocked, airportSizeClass, airportsBySize,
       };
     }
   }
