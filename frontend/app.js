@@ -47,6 +47,7 @@
     mode: "simplified",
     realisticUnlocked: false,
     reputation: 1.0,
+    gameTimeHours: 0,
     fuelInventoryKg: 0,
     co2InventoryTonnes: 0,
     personnel: { pilots: 0, cabinCrew: 0, groundCrew: 0 },
@@ -117,25 +118,104 @@
     return points;
   }
 
-  function routeIncome(route) {
+  function routeEconomyCalc(route) {
     const a = airportById.get(route.from);
     const b = airportById.get(route.to);
-    if (!a || !b) return 0;
-    const km = haversineKm(a, b);
     const plane = routePlane(route);
-    if (!plane) return 0;
+    const empty = {
+      km: 0, flightHours: 0, cycleHours: 0, flightsPerSec: 0,
+      paxWilling: 0, paxPerFlight: 0,
+      farePerPax: 0, revenuePerSec: 0,
+      costBreakdown: { fuel: 0, nav: 0, crew: 0, maint: 0, insurance: 0, landing: 0 },
+      costPerSec: 0, profitPerSec: 0,
+      tier: 0, grounded: true, groundedReason: "missing data",
+      hubBonus: 0, seasonal: 1, eventMult: 1, priceMult: 1, repMult: 1,
+      loadFactor: 0, efficiency: 1, fare: ECON_DATA.ECON.fareUsdPerPaxPerKm,
+    };
+    if (!a || !b || !plane) return empty;
     const variant = PLANE_DATA.variantById(plane.variantId);
-    if (!variant) return 0;
-    if (km > variant.rangeKm) return 0;
-    const distFactor = Math.max(0.2, km / 1000);
-    const tierBaseRate = { 1: 0.5, 2: 5, 3: 30, 4: 100 };
-    return (tierBaseRate[variant.tier] || 0) * distFactor;
+    if (!variant) return empty;
+    if (ECON_DATA.isGrounded(plane)) return { ...empty, tier: variant.tier, grounded: true, groundedReason: "low health", efficiency: ECON_DATA.efficiency(plane) };
+    const km = haversineKm(a, b);
+    if (km > variant.rangeKm) return { ...empty, km, tier: variant.tier, grounded: true, groundedReason: "out of range" };
+
+    const farePerKm = (typeof route.farePerPaxPerKm === "number") ? route.farePerPaxPerKm : ECON_DATA.ECON.fareUsdPerPaxPerKm;
+    const cycleHours = ECON_DATA.cycleHours(km, variant, a, b, state.routes);
+    const flightsPerSec = 1 / (cycleHours * 3600);
+
+    const baseDemand = ECON_DATA.computeBaseDemand(a, b, km);
+    const seasonal = ECON_DATA.computeSeasonality(state.gameTimeHours);
+    const eventMult = ECON_DATA.applyEventsToRoute(route, a, b, state.events);
+    const priceMult = ECON_DATA.priceElasticity(farePerKm);
+    const repMult = state.reputation;
+    const hubBonus = ECON_DATA.computeHubBonus(a, b, state.routes);
+    const paxWilling = baseDemand * seasonal * eventMult * priceMult * repMult * (1 + hubBonus);
+
+    const efficiency = ECON_DATA.efficiency(plane);
+    const seatsEffective = variant.seats * efficiency;
+    const paxPerFlight = Math.max(0, Math.min(seatsEffective, paxWilling));
+    const loadFactor = seatsEffective > 0 ? paxPerFlight / seatsEffective : 0;
+
+    const farePerPax = farePerKm * km;
+    const revenuePerFlight = paxPerFlight * farePerPax;
+    const revenuePerSec = flightsPerSec * revenuePerFlight;
+
+    const fuel = km * variant.fuelKgPerKm * ECON_DATA.ECON.fuelPriceUsdPerKg;
+    const nav = km * ECON_DATA.ECON.navFeeUsdPerKm;
+    const crew = (km / variant.cruiseKmh) * ECON_DATA.ECON.crewUsdPerHour[variant.tier];
+    const ageMult = 1.5 - plane.health / 100;
+    const maint = (km / variant.cruiseKmh) * ECON_DATA.ECON.maintenanceUsdPerHour[variant.tier] * ageMult;
+    const insurance = (km / variant.cruiseKmh) * ECON_DATA.ECON.insuranceUsdPerHour[variant.tier];
+    const landingFee = ECON_DATA.landingFeePerPaxOf(a) + ECON_DATA.landingFeePerPaxOf(b);
+    const landing = paxPerFlight * landingFee;
+    const costPerFlight = fuel + nav + crew + maint + insurance + landing;
+    const costPerSec = flightsPerSec * costPerFlight;
+    const profitPerSec = revenuePerSec - costPerSec;
+
+    return {
+      km, flightHours: km / variant.cruiseKmh, cycleHours, flightsPerSec,
+      paxWilling, paxPerFlight, farePerPax, revenuePerSec,
+      costBreakdown: { fuel, nav, crew, maint, insurance, landing },
+      costPerSec, profitPerSec,
+      tier: variant.tier, grounded: false, groundedReason: "",
+      hubBonus, seasonal, eventMult, priceMult, repMult,
+      loadFactor, efficiency, fare: farePerKm,
+    };
+  }
+
+  function routeIncome(route) {
+    return routeEconomyCalc(route).profitPerSec;
   }
 
   function totalIncomePerSec() {
     let sum = 0;
-    for (const r of state.routes) sum += routeIncome(r);
+    for (const r of state.routes) sum += routeEconomyCalc(r).profitPerSec;
     return sum;
+  }
+
+  function simulateRoute(route, dtSec) {
+    const eco = routeEconomyCalc(route);
+    if (eco.grounded) return eco;
+    const profit = eco.profitPerSec * dtSec;
+    state.cash += profit;
+    if (eco.profitPerSec > 0) state.totalEarned += profit;
+    state.stats.paxCarried += eco.paxPerFlight * eco.flightsPerSec * dtSec;
+    state.stats.flightsDone += eco.flightsPerSec * dtSec;
+    const plane = getPlane(route.planeId);
+    if (plane) {
+      plane.ageHours += eco.cycleHours * eco.flightsPerSec * dtSec;
+      const wear = (ECON_DATA.ECON.wearPerFlightByTier[eco.tier] || 0.1) * eco.flightsPerSec * dtSec;
+      plane.health = Math.max(0, plane.health - wear);
+    }
+    return eco;
+  }
+
+  function applyReputationDrift(dtSec) {
+    let netProfitRate = 0;
+    for (const r of state.routes) netProfitRate += routeEconomyCalc(r).profitPerSec;
+    const sign = netProfitRate >= 0 ? 1 : -1;
+    const delta = sign * ECON_DATA.ECON.reputationDrift * Math.min(1, Math.abs(netProfitRate) / 100) * dtSec;
+    state.reputation = ECON_DATA.clampReputation(state.reputation + delta);
   }
 
   function getPlane(planeId) {
@@ -620,25 +700,42 @@
           ${state.routes.map(r => {
             const a = airportById.get(r.from);
             const b = airportById.get(r.to);
-            const income = routeIncome(r);
+            const eco = routeEconomyCalc(r);
             const plane = routePlane(r);
             const variant = plane ? PLANE_DATA.variantById(plane.variantId) : null;
             const tier = variant ? variant.tier : 1;
             const code = variant ? variant.name : "?";
+            const healthPct = plane ? Math.round(plane.health) : 0;
+            const healthColor = plane && plane.health > 70 ? "var(--good)" : plane && plane.health > 30 ? "var(--warn)" : "var(--bad)";
+            const profitClass = eco.profitPerSec > 0 ? "profit-pos" : eco.profitPerSec < 0 ? "profit-neg" : "";
+            const statusText = eco.grounded ? eco.groundedReason : `${eco.loadFactor > 0.95 ? "full" : Math.round(eco.loadFactor*100) + "% load"}`;
             return `
               <div class="route-item">
                 <div class="route-codes">${r.from} <span class="arrow">→</span> ${r.to}</div>
                 <div class="route-meta">
                   <span class="plane-pill tier-${tier}">${code}</span>
-                  <span class="route-income">${income > 0 ? fmtMoney(income) + "/s" : "out of range"}</span>
+                  <span class="route-income ${profitClass}">${eco.grounded ? "—" : fmtMoney(eco.profitPerSec) + "/s"}</span>
                 </div>
                 <div class="route-meta">
                   <span>${a ? a.city : ""} → ${b ? b.city : ""}</span>
                   <button class="btn danger" data-action="close-route" data-route-id="${r.id}" style="padding:3px 8px; font-size:10px;">Close</button>
                 </div>
                 <div class="route-meta" style="font-size:10px; color:var(--text-faint);">
-                  <span>${a && b ? fmtNum(haversineKm(a, b)) + " km" : ""}</span>
+                  <span>${a && b ? fmtNum(eco.km) + " km" : ""}</span>
+                  <span>health <span style="color:${healthColor}">${healthPct}%</span></span>
+                  <span>${statusText}</span>
                 </div>
+                ${!eco.grounded ? `
+                <div class="route-econ" style="font-size:10px; color:var(--text-faint); margin-top:4px;">
+                  rev <span style="color:var(--good)">${fmtMoney(eco.revenuePerSec)}</span> · cost <span style="color:var(--bad)">${fmtMoney(eco.costPerSec)}</span>
+                  <div class="cost-bar">
+                    ${Object.entries(eco.costBreakdown).map(([k,v]) => {
+                      const pct = eco.costPerSec > 0 ? (v / eco.costPerSec) * 100 : 0;
+                      return `<div class="cost-seg" style="width:${pct}%;" data-kind="${k}" title="${k}: ${fmtMoney(v)}/s"></div>`;
+                    }).join("")}
+                  </div>
+                </div>
+                ` : ""}
               </div>
             `;
           }).join("")}
@@ -651,13 +748,30 @@
     const totalRoutes = state.routes.length;
     const income = totalIncomePerSec();
     const uptimeH = ((Date.now() - state.startedAt) / 3600000).toFixed(1);
+    const reputationPct = Math.round(state.reputation * 100);
+    const gameDays = Math.floor(state.gameTimeHours / 24);
     return `
       <div class="panel-section">
         <div class="kv"><span class="k">Cash on hand</span><span class="v">${fmtMoney(state.cash)}</span></div>
         <div class="kv"><span class="k">Total earned</span><span class="v">${fmtMoney(state.totalEarned)}</span></div>
-        <div class="kv"><span class="k">Income / sec</span><span class="v">${fmtMoney(income)}</span></div>
-        <div class="kv"><span class="k">Income / min</span><span class="v">${fmtMoney(income * 60)}</span></div>
-        <div class="kv"><span class="k">Income / hr</span><span class="v">${fmtMoney(income * 3600)}</span></div>
+        <div class="kv"><span class="k">Profit / sec</span><span class="v ${income >= 0 ? 'profit-pos' : 'profit-neg'}">${fmtMoney(income)}</span></div>
+        <div class="kv"><span class="k">Profit / min</span><span class="v">${fmtMoney(income * 60)}</span></div>
+        <div class="kv"><span class="k">Profit / hr</span><span class="v">${fmtMoney(income * 3600)}</span></div>
+      </div>
+      <div class="panel-section">
+        <h3>Reputation</h3>
+        <div class="reputation-bar">
+          <div class="reputation-fill" style="width:${reputationPct}%;"></div>
+          <span class="reputation-label">${reputationPct}%</span>
+        </div>
+        <div style="color:var(--text-faint); font-size:11px; margin-top:4px;">Drifts based on profit rate. Higher = more demand.</div>
+      </div>
+      <div class="panel-section">
+        <h3>Operations</h3>
+        <div class="kv"><span class="k">Game time</span><span class="v">${gameDays}d ${Math.floor(state.gameTimeHours % 24)}h</span></div>
+        <div class="kv"><span class="k">Passengers flown</span><span class="v">${Math.round(state.stats.paxCarried).toLocaleString()}</span></div>
+        <div class="kv"><span class="k">Flights flown</span><span class="v">${state.stats.flightsDone.toFixed(2)}</span></div>
+        <div class="kv"><span class="k">Uptime</span><span class="v">${uptimeH} h</span></div>
       </div>
       <div class="panel-section">
         <h3>Fleet</h3>
@@ -671,7 +785,6 @@
         <h3>Network</h3>
         <div class="kv"><span class="k">Active routes</span><span class="v">${totalRoutes}</span></div>
         <div class="kv"><span class="k">Airports unlocked</span><span class="v">${airports.filter(isAirportUnlocked).length} / ${airports.length}</span></div>
-        <div class="kv"><span class="k">Uptime</span><span class="v">${uptimeH} h</span></div>
       </div>
       <div class="panel-section">
         <h3>Milestones</h3>
@@ -1001,11 +1114,10 @@
   }
 
   function tick() {
-    const income = totalIncomePerSec();
-    if (income > 0) {
-      state.cash += income;
-      state.totalEarned += income;
-    }
+    const dtSec = TICK_MS / 1000;
+    state.gameTimeHours += dtSec * ECON_DATA.ECON.gameSecondsPerGameHour;
+    for (const r of state.routes) simulateRoute(r, dtSec);
+    applyReputationDrift(dtSec);
     tryUnlockMediumAirports();
     renderTopBar();
     if (panelMode === "hangar" || panelMode === "stats" || panelMode === "routes") renderPanel();
@@ -1065,7 +1177,7 @@
       setTimeout(() => toast("Welcome, CEO! Click an airport to start.", "good"), 500);
     }
     if (typeof window !== "undefined") {
-      window.__ifm = { map, state, get airports() { return airports; }, load, migrateV1ToV2, save };
+      window.__ifm = { map, state, get airports() { return airports; }, load, migrateV1ToV2, save, routeEconomyCalc, simulateRoute, routeIncome, totalIncomePerSec };
     }
   }
 

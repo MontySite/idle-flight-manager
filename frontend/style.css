@@ -522,6 +522,56 @@ button {
 }
 
 /* ================================
+   Profit colorization + cost bar
+   ================================ */
+.profit-pos { color: var(--good) !important; }
+.profit-neg { color: var(--bad) !important; }
+.route-income.profit-neg { color: var(--bad); }
+
+.cost-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-3);
+  margin-top: 4px;
+}
+.cost-seg { height: 100%; }
+.cost-seg[data-kind="fuel"]      { background: #f97316; }
+.cost-seg[data-kind="nav"]       { background: #64748b; }
+.cost-seg[data-kind="crew"]      { background: #38bdf8; }
+.cost-seg[data-kind="maint"]     { background: #a78bfa; }
+.cost-seg[data-kind="insurance"] { background: #4ade80; }
+.cost-seg[data-kind="landing"]   { background: #f5b800; }
+
+.reputation-bar {
+  position: relative;
+  height: 22px;
+  background: var(--bg-3);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+}
+.reputation-fill {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  background: linear-gradient(90deg, #38bdf8 0%, #4ade80 100%);
+  transition: width 300ms ease;
+}
+.reputation-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  font-family: "JetBrains Mono", monospace;
+  text-shadow: 0 0 4px rgba(0,0,0,0.5);
+}
+
+/* ================================
    Hangar (brand / variant)
    ================================ */
 .hangar-brands {
