@@ -17,6 +17,55 @@
   const UNLOCK_MEDIUM_AT = 50000;
   const UNLOCK_REALISTIC_AT = 5_000_000;
   const UNLOCK_SMALL_AIRPORTS_AT = 1_000_000;
+  const UNLOCK_ALLIANCES_AT = 50_000_000;
+
+  const ALLIANCES = {
+    star: {
+      code: "STAR",
+      name: "Star Alliance",
+      blurb: "Largest global alliance. Best fuel discounts and slot priority.",
+      joiningFee: 50_000_000,
+      annualFee: 10_000_000,
+      exitPenalty: 25_000_000,
+      color: "#f5b800",
+      perks: {
+        fuelDiscount: 0.05,
+        reputationBonus: 0.05,
+        codeshare: 0.30,
+        slotPriority: true,
+      },
+    },
+    skyteam: {
+      code: "SKYTEAM",
+      name: "SkyTeam",
+      blurb: "Strong EU/Asia coverage. Highest reputation bonus.",
+      joiningFee: 50_000_000,
+      annualFee: 8_000_000,
+      exitPenalty: 20_000_000,
+      color: "#38bdf8",
+      perks: {
+        fuelDiscount: 0.03,
+        reputationBonus: 0.08,
+        codeshare: 0.20,
+        slotPriority: false,
+      },
+    },
+    oneworld: {
+      code: "ONEWORLD",
+      name: "Oneworld",
+      blurb: "Premium alliance. Highest codeshare revenue share.",
+      joiningFee: 50_000_000,
+      annualFee: 12_000_000,
+      exitPenalty: 30_000_000,
+      color: "#a78bfa",
+      perks: {
+        fuelDiscount: 0.04,
+        reputationBonus: 0.04,
+        codeshare: 0.40,
+        slotPriority: true,
+      },
+    },
+  };
 
   const EVENT_TEMPLATES = [
     { type: "storm",          durationHours: 18,    demandMult: 0.40, appliesTo: "region",  baseProbPerGameHour: 0.040 },
@@ -55,7 +104,7 @@
   };
 
   const EVENT_TICK_HOURS_BUDGET_PER_TICK = 1;
-  const STARTING_CASH = 10000;
+  const STARTING_CASH = 100000;
 
   const PRINCIPAL_AIRPORTS = new Set([
     "JFK","LAX","ORD","ATL","DFW","DEN","SFO","SEA","MIA","BOS","IAD","EWR",
@@ -95,6 +144,7 @@
     campaigns: [],
     nextCampaignId: 1,
     events: [],
+    alliance: null,
     stats: { paxCarried: 0, flightsDone: 0 },
     lastSaved: Date.now(),
     startedAt: Date.now(),
@@ -285,7 +335,9 @@
     let netProfitRate = 0;
     for (const r of state.routes) netProfitRate += routeEconomyCalc(r).profitPerSec;
     const sign = netProfitRate >= 0 ? 1 : -1;
-    const delta = sign * ECON_DATA.ECON.reputationDrift * Math.min(1, Math.abs(netProfitRate) / 100) * dtSec;
+    let delta = sign * ECON_DATA.ECON.reputationDrift * Math.min(1, Math.abs(netProfitRate) / 100) * dtSec;
+    const bonus = getAllianceReputationBonus();
+    if (bonus > 0) delta += bonus * 0.0001 * dtSec;
     state.reputation = ECON_DATA.clampReputation(state.reputation + delta);
   }
 
@@ -358,6 +410,7 @@
       if (typeof state.nextCampaignId !== "number") state.nextCampaignId = 1;
       if (!Array.isArray(state.events)) state.events = [];
       if (typeof state.nextEventId !== "number") state.nextEventId = 1;
+      if (!state.alliance) state.alliance = null;
       if (!state.stats) state.stats = { paxCarried: 0, flightsDone: 0 };
       for (const p of state.planes) {
         if (typeof p.hoursSinceACheck !== "number") p.hoursSinceACheck = 0;
@@ -689,7 +742,8 @@
   }
 
   function currentFuelPrice() {
-    return ECON_DATA.ECON.fuelPriceUsdPerKg * currentFuelMult();
+    const discount = getAllianceFuelDiscount();
+    return ECON_DATA.ECON.fuelPriceUsdPerKg * currentFuelMult() * (1 - discount);
   }
 
   function pickEventTarget(tmpl) {
@@ -912,6 +966,92 @@
     renderAll();
   }
 
+  function tryUnlockAlliances() {
+    if (state.totalEarned >= UNLOCK_ALLIANCES_AT && !state.allianceUnlockedAnnounced) {
+      state.allianceUnlockedAnnounced = true;
+      toast("Alliances now available in Resources panel!", "good");
+    }
+  }
+
+  function currentAlliance() {
+    if (!state.alliance) return null;
+    return ALLIANCES[state.alliance] || null;
+  }
+
+  function getAllianceFuelDiscount() {
+    const a = currentAlliance();
+    return a ? a.perks.fuelDiscount : 0;
+  }
+
+  function getAllianceReputationBonus() {
+    const a = currentAlliance();
+    return a ? a.perks.reputationBonus : 0;
+  }
+
+  function hasAllianceSlotPriority() {
+    const a = currentAlliance();
+    return !!(a && a.perks.slotPriority);
+  }
+
+  function getAllianceCodeshareRate() {
+    const a = currentAlliance();
+    return a ? a.perks.codeshare : 0;
+  }
+
+  function joinAlliance(code) {
+    const a = ALLIANCES[code];
+    if (!a) { toast("Unknown alliance", "bad"); return; }
+    if (state.alliance) {
+      toast(`Leave ${ALLIANCES[state.alliance].name} first`, "warn");
+      return;
+    }
+    if (state.cash < a.joiningFee) {
+      toast(`Need ${fmtMoney(a.joiningFee)} to join ${a.name}`, "bad");
+      return;
+    }
+    state.cash -= a.joiningFee;
+    state.alliance = code;
+    toast(`Joined ${a.name}! Fuel discount +${(a.perks.fuelDiscount*100).toFixed(0)}%, codeshare ${(a.perks.codeshare*100).toFixed(0)}%`, "good");
+    save();
+    renderAll();
+  }
+
+  function leaveAlliance() {
+    if (!state.alliance) return;
+    const a = ALLIANCES[state.alliance];
+    if (!a) { state.alliance = null; save(); return; }
+    if (state.cash < a.exitPenalty) {
+      toast(`Need ${fmtMoney(a.exitPenalty)} to leave ${a.name}`, "bad");
+      return;
+    }
+    state.cash -= a.exitPenalty;
+    state.alliance = null;
+    toast(`Left ${a.name} (penalty ${fmtMoney(a.exitPenalty)})`, "warn");
+    save();
+    renderAll();
+  }
+
+  function applyAllianceAnnualFee(dtGameHours) {
+    const a = currentAlliance();
+    if (!a) return;
+    const perHour = a.annualFee / (365 * 24);
+    state.cash -= perHour * dtGameHours;
+  }
+
+  function applyAllianceCodeshareRevenue(dtGameHours) {
+    const a = currentAlliance();
+    if (!a) return;
+    const rate = a.perks.codeshare;
+    if (rate <= 0) return;
+    let grossPerHour = 0;
+    for (const r of state.routes) {
+      const eco = routeEconomyCalc(r);
+      if (!eco.grounded) grossPerHour += Math.max(0, eco.revenuePerSec) * 3600;
+    }
+    const perHour = grossPerHour * rate;
+    state.cash += perHour * (dtGameHours / 3600);
+  }
+
   function applyMarketingTick(dtGameHours) {
     for (let i = state.campaigns.length - 1; i >= 0; i--) {
       state.campaigns[i].hoursRemaining -= dtGameHours;
@@ -1015,6 +1155,10 @@
           hirePersonnel(el.getAttribute("data-kind"), parseInt(el.getAttribute("data-count"), 10));
         } else if (action === "start-campaign") {
           startMarketingCampaign(el.getAttribute("data-region"));
+        } else if (action === "join-alliance") {
+          joinAlliance(el.getAttribute("data-code"));
+        } else if (action === "leave-alliance") {
+          leaveAlliance();
         }
       });
     });
@@ -1171,6 +1315,57 @@
           <button class="btn" data-action="start-campaign" data-region="AF">AF</button>
           <button class="btn" data-action="start-campaign" data-region="OC">OC</button>
         </div>
+      </div>
+      <div class="panel-section">
+        <h3>Alliance</h3>
+        ${state.alliance ? renderAllianceJoined(ALLIANCES[state.alliance]) : renderAllianceChoose()}
+      </div>
+    `;
+  }
+
+  function renderAllianceChoose() {
+    const unlocked = state.totalEarned >= UNLOCK_ALLIANCES_AT;
+    if (!unlocked) {
+      return `
+        <p style="color:var(--text-dim); font-size:11px; margin:0 0 6px;">
+          Alliances unlock at <strong>${fmtMoney(UNLOCK_ALLIANCES_AT)}</strong> total earned.
+        </p>
+        <div class="empty">No alliance available yet.</div>
+      `;
+    }
+    const cards = Object.values(ALLIANCES).map(a => `
+      <div class="variant-card" style="border-left-color:${a.color};">
+        <div class="variant-header">
+          <span class="variant-name" style="color:${a.color};">${a.name}</span>
+        </div>
+        <div class="variant-meta" style="margin-bottom:6px;">${a.blurb}</div>
+        <div class="kv"><span class="k">Joining fee</span><span class="v">${fmtMoney(a.joiningFee)}</span></div>
+        <div class="kv"><span class="k">Annual fee</span><span class="v">${fmtMoney(a.annualFee)}</span></div>
+        <div class="kv"><span class="k">Exit penalty</span><span class="v">${fmtMoney(a.exitPenalty)}</span></div>
+        <div class="kv"><span class="k">Fuel discount</span><span class="v">${(a.perks.fuelDiscount*100).toFixed(0)}%</span></div>
+        <div class="kv"><span class="k">Reputation bonus</span><span class="v">+${(a.perks.reputationBonus*100).toFixed(0)}%</span></div>
+        <div class="kv"><span class="k">Codeshare</span><span class="v">${(a.perks.codeshare*100).toFixed(0)}%</span></div>
+        <div class="kv"><span class="k">Slot priority</span><span class="v">${a.perks.slotPriority ? "✓" : "—"}</span></div>
+        <button class="btn primary" style="width:100%; margin-top:8px;" data-action="join-alliance" data-code="${a.code.toLowerCase()}" ${state.cash >= a.joiningFee ? "" : "disabled"}>Join ${a.name}</button>
+      </div>
+    `).join("");
+    return `<p style="color:var(--text-dim); font-size:11px; margin:0 0 8px;">Choose one alliance. Switching requires leaving first (penalty applies).</p>${cards}`;
+  }
+
+  function renderAllianceJoined(a) {
+    return `
+      <div class="variant-card" style="border-left-color:${a.color}; background:linear-gradient(180deg, ${a.color}22 0%, var(--bg-2) 60%);">
+        <div class="variant-header">
+          <span class="variant-name" style="color:${a.color};">${a.name}</span>
+          <span class="event-target">joined</span>
+        </div>
+        <div class="variant-meta" style="margin-bottom:6px;">${a.blurb}</div>
+        <div class="kv"><span class="k">Annual fee</span><span class="v" style="color:var(--bad);">-${fmtMoney(a.annualFee)}/yr</span></div>
+        <div class="kv"><span class="k">Fuel discount</span><span class="v">${(a.perks.fuelDiscount*100).toFixed(0)}%</span></div>
+        <div class="kv"><span class="k">Reputation bonus</span><span class="v">+${(a.perks.reputationBonus*100).toFixed(0)}%</span></div>
+        <div class="kv"><span class="k">Codeshare</span><span class="v">${(a.perks.codeshare*100).toFixed(0)}%</span></div>
+        <div class="kv"><span class="k">Slot priority</span><span class="v">${a.perks.slotPriority ? "✓" : "—"}</span></div>
+        <button class="btn danger" style="width:100%; margin-top:8px;" data-action="leave-alliance" ${state.cash >= a.exitPenalty ? "" : "disabled"}>Leave (penalty ${fmtMoney(a.exitPenalty)})</button>
       </div>
     `;
   }
@@ -1821,10 +2016,15 @@
     for (const r of state.routes) simulateRoute(r, dtSec);
     applyEventTick(dtGameHours);
     applyMarketingTick(dtGameHours);
+    if (state.mode === "realistic") {
+      applyAllianceCodeshareRevenue(dtGameHours);
+      applyAllianceAnnualFee(dtGameHours);
+    }
     applyReputationDrift(dtSec);
     if (state.mode === "realistic") applySalaries(dtGameHours);
     tryUnlockMediumAirports();
     tryUnlockSmallAirports();
+    tryUnlockAlliances();
     tryUnlockRealisticMode();
     renderTopBar();
     if (["hangar", "stats", "routes", "events", "resources"].includes(panelMode)) renderPanel();
@@ -1900,6 +2100,9 @@
         doMaintenanceCheck, setSeatConfig, startMarketingCampaign,
         applyMarketingTick, realisticGroundedReason, planePersonnelRequirements,
         tryUnlockSmallAirports, isAirportUnlocked, airportSizeClass, airportsBySize,
+        ALLIANCES, currentAlliance, joinAlliance, leaveAlliance, tryUnlockAlliances,
+        getAllianceFuelDiscount, getAllianceReputationBonus, getAllianceCodeshareRate,
+        hasAllianceSlotPriority, applyAllianceCodeshareRevenue, applyAllianceAnnualFee,
       };
     }
   }
