@@ -16,7 +16,7 @@ from pathlib import Path
 OURAIRPORTS_URL = "https://davidmegginson.github.io/ourairports-data/airports.csv"
 CACHE_DIR = Path(__file__).parent / "data"
 OUT_FILE = CACHE_DIR / "airports.json"
-TYPES_WE_WANT = {"large_airport", "medium_airport"}
+TYPES_WE_WANT = {"large_airport", "medium_airport", "small_airport"}
 
 
 def http_get(url: str, timeout: int = 120) -> bytes:

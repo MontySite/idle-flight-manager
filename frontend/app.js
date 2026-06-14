@@ -1,7 +1,8 @@
 (() => {
   "use strict";
 
-  const SAVE_KEY = "ifm.save.v1";
+  const SAVE_KEY = "ifm.save.v2";
+  const SAVE_KEY_V1 = "ifm.save.v1";
   const TICK_MS = 1000;
   const AUTOSAVE_MS = 15000;
   const MIN_ZOOM_FOR_VISIBLE = 3;
@@ -37,10 +38,20 @@
   const state = {
     cash: STARTING_CASH,
     totalEarned: 0,
-    fleet: { 1: 0, 2: 0, 3: 0, 4: 0 },
+    planes: [],
+    nextPlaneId: 1,
     routes: [],
     nextRouteId: 1,
     mediumAirportsUnlocked: false,
+    smallAirportsUnlocked: false,
+    mode: "simplified",
+    realisticUnlocked: false,
+    reputation: 1.0,
+    fuelInventoryKg: 0,
+    co2InventoryTonnes: 0,
+    personnel: { pilots: 0, cabinCrew: 0, groundCrew: 0 },
+    events: [],
+    stats: { paxCarried: 0, flightsDone: 0 },
     lastSaved: Date.now(),
     startedAt: Date.now(),
   };
@@ -106,20 +117,19 @@
     return points;
   }
 
-  function planeByTier(tier) {
-    return PLANE_TYPES.find(p => p.tier === tier);
-  }
-
   function routeIncome(route) {
     const a = airportById.get(route.from);
     const b = airportById.get(route.to);
     if (!a || !b) return 0;
     const km = haversineKm(a, b);
-    const plane = planeByTier(route.tier);
+    const plane = routePlane(route);
     if (!plane) return 0;
-    if (km > plane.range) return 0;
+    const variant = PLANE_DATA.variantById(plane.variantId);
+    if (!variant) return 0;
+    if (km > variant.rangeKm) return 0;
     const distFactor = Math.max(0.2, km / 1000);
-    return plane.baseRate * distFactor;
+    const tierBaseRate = { 1: 0.5, 2: 5, 3: 30, 4: 100 };
+    return (tierBaseRate[variant.tier] || 0) * distFactor;
   }
 
   function totalIncomePerSec() {
@@ -128,8 +138,29 @@
     return sum;
   }
 
+  function getPlane(planeId) {
+    return state.planes.find(p => p.id === planeId) || null;
+  }
+
+  function planesByTier(tier) {
+    const out = [];
+    for (const p of state.planes) {
+      const v = PLANE_DATA.variantById(p.variantId);
+      if (v && v.tier === tier) out.push(p);
+    }
+    return out;
+  }
+
+  function unassignedPlanesByTier(tier) {
+    return planesByTier(tier).filter(p => !p.assignedRouteId);
+  }
+
+  function routePlane(route) {
+    return getPlane(route.planeId);
+  }
+
   function fleetSize() {
-    return state.fleet[1] + state.fleet[2] + state.fleet[3] + state.fleet[4];
+    return state.planes.length;
   }
 
   function isAirportUnlocked(ap) {
@@ -147,14 +178,77 @@
 
   function load() {
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return false;
-      const data = JSON.parse(raw);
+      let raw = localStorage.getItem(SAVE_KEY);
+      let data = null;
+      if (raw) {
+        data = JSON.parse(raw);
+      } else {
+        const v1raw = localStorage.getItem(SAVE_KEY_V1);
+        if (v1raw) {
+          data = migrateV1ToV2(JSON.parse(v1raw));
+        }
+      }
+      if (!data) return false;
       Object.assign(state, data);
+      if (!Array.isArray(state.planes)) state.planes = [];
+      if (typeof state.nextPlaneId !== "number") state.nextPlaneId = 1;
+      if (typeof state.reputation !== "number") state.reputation = 1.0;
+      if (!state.personnel) state.personnel = { pilots: 0, cabinCrew: 0, groundCrew: 0 };
+      if (!Array.isArray(state.events)) state.events = [];
+      if (!state.stats) state.stats = { paxCarried: 0, flightsDone: 0 };
+      for (const r of state.routes) {
+        if (typeof r.tier !== "undefined" && !r.planeId) r.tier = r.tier;
+      }
       return true;
     } catch (e) {
       return false;
     }
+  }
+
+  function migrateV1ToV2(v1) {
+    const next = Object.assign({}, v1);
+    delete next.fleet;
+    next.planes = [];
+    next.nextPlaneId = 1;
+    const tierVariants = {
+      1: PLANE_DATA.cheapestVariantForTier(1)?.id,
+      2: PLANE_DATA.cheapestVariantForTier(2)?.id,
+      3: PLANE_DATA.cheapestVariantForTier(3)?.id,
+      4: PLANE_DATA.cheapestVariantForTier(4)?.id,
+    };
+    const v1fleet = v1.fleet || {};
+    for (const tierStr of Object.keys(v1fleet)) {
+      const tier = parseInt(tierStr, 10);
+      const count = v1fleet[tier] || 0;
+      const variantId = tierVariants[tier];
+      if (!variantId) continue;
+      for (let i = 0; i < count; i++) {
+        next.planes.push({
+          id: next.nextPlaneId++,
+          variantId,
+          ageHours: 0,
+          health: 100,
+          seatConfig: { economy: 0.80, business: 0.15, first: 0.05 },
+          assignedRouteId: null,
+        });
+      }
+    }
+    if (Array.isArray(v1.routes)) {
+      for (const r of v1.routes) {
+        if (r.tier && !r.planeId) {
+          const free = next.planes.find(p => {
+            const v = PLANE_DATA.variantById(p.variantId);
+            return v && v.tier === r.tier && !p.assignedRouteId;
+          });
+          if (free) {
+            r.planeId = free.id;
+            free.assignedRouteId = r.id;
+          }
+        }
+        delete r.tier;
+      }
+    }
+    return next;
   }
 
   function applyOfflineProgress() {
@@ -175,26 +269,39 @@
   }
 
   function buyPlane(tier) {
-    const plane = planeByTier(tier);
-    if (!plane) return;
-    if (state.cash < plane.cost) {
-      toast("Not enough cash to buy a " + plane.name, "bad");
+    const variant = PLANE_DATA.cheapestVariantForTier(tier);
+    if (!variant) { toast(`No tier ${tier} plane available`, "bad"); return; }
+    if (!PLANE_DATA.canPurchaseVariant(variant.id, state.planes)) {
+      toast(`${variant.name} is not yet unlocked`, "bad");
       return;
     }
-    state.cash -= plane.cost;
-    state.fleet[tier] += 1;
-    toast(`Purchased ${plane.name} for ${fmtMoney(plane.cost)}`, "good");
+    if (state.cash < variant.cost) {
+      toast("Not enough cash to buy a " + variant.name, "bad");
+      return;
+    }
+    state.cash -= variant.cost;
+    const plane = {
+      id: state.nextPlaneId++,
+      variantId: variant.id,
+      ageHours: 0,
+      health: 100,
+      seatConfig: { economy: 0.80, business: 0.15, first: 0.05 },
+      assignedRouteId: null,
+    };
+    state.planes.push(plane);
+    toast(`Purchased ${variant.name} for ${fmtMoney(variant.cost)}`, "good");
     save();
     renderAll();
   }
 
   function sellPlane(tier) {
-    if (state.fleet[tier] <= 0) return;
-    const plane = planeByTier(tier);
-    const refund = Math.floor(plane.cost * 0.5);
-    state.fleet[tier] -= 1;
+    const plane = unassignedPlanesByTier(tier)[0];
+    if (!plane) return;
+    const variant = PLANE_DATA.variantById(plane.variantId);
+    const refund = Math.floor(variant.cost * 0.5);
+    state.planes = state.planes.filter(p => p.id !== plane.id);
     state.cash += refund;
-    toast(`Sold a ${plane.name} for ${fmtMoney(refund)}`, "warn");
+    toast(`Sold a ${variant.name} for ${fmtMoney(refund)}`, "warn");
     save();
     renderAll();
   }
@@ -204,28 +311,32 @@
     const to = airportById.get(toId);
     if (!from || !to) { toast("Unknown airport", "bad"); return false; }
     if (fromId === toId) { toast("Origin and destination must differ", "bad"); return false; }
-    if (state.fleet[tier] <= 0) { toast("You don't own a plane of that tier", "bad"); return false; }
     const km = haversineKm(from, to);
-    const plane = planeByTier(tier);
-    if (km > plane.range) {
-      toast(`${plane.name} can't fly ${fmtNum(km)} km (range ${fmtNum(plane.range)} km)`, "bad");
+    const candidates = unassignedPlanesByTier(tier);
+    const candidate = candidates
+      .map(p => ({ plane: p, variant: PLANE_DATA.variantById(p.variantId) }))
+      .find(({ variant }) => variant && variant.rangeKm >= km) || null;
+    if (!candidate) {
+      const sample = PLANE_DATA.variantsByTier(tier)[0];
+      const name = sample ? sample.name : `Tier ${tier}`;
+      toast(`No ${name} in your hangar with range for ${fmtNum(km)} km`, "bad");
       return false;
     }
     if (state.routes.some(r => r.from === fromId && r.to === toId)) {
       toast("A route already exists between these airports", "warn");
       return false;
     }
-    state.fleet[tier] -= 1;
     const route = {
       id: state.nextRouteId++,
       from: fromId,
       to: toId,
-      tier,
+      planeId: candidate.plane.id,
       createdAt: Date.now(),
     };
+    candidate.plane.assignedRouteId = route.id;
     state.routes.push(route);
     const income = routeIncome(route);
-    toast(`Route ${fromId} → ${toId} opened (+${fmtMoney(income)}/s)`, "good");
+    toast(`Route ${fromId} → ${toId} opened with ${candidate.variant.name} (+${fmtMoney(income)}/s)`, "good");
     save();
     drawRoute(route);
     renderAll();
@@ -237,9 +348,11 @@
     if (idx < 0) return;
     const r = state.routes[idx];
     state.routes.splice(idx, 1);
-    state.fleet[r.tier] += 1;
+    const plane = getPlane(r.planeId);
+    if (plane) plane.assignedRouteId = null;
     removeRoutePolyline(routeId);
-    toast(`Route closed, ${planeByTier(r.tier).name} returned to hangar`, "warn");
+    const variant = plane ? PLANE_DATA.variantById(plane.variantId) : null;
+    toast(`Route closed, ${variant ? variant.name : "plane"} returned to hangar`, "warn");
     save();
     renderAll();
   }
@@ -369,11 +482,15 @@
       const otherAp = airportById.get(other);
       const direction = r.from === ap.id ? "→" : "←";
       const income = routeIncome(r);
+      const plane = routePlane(r);
+      const variant = plane ? PLANE_DATA.variantById(plane.variantId) : null;
+      const tier = variant ? variant.tier : 1;
+      const code = variant ? variant.name : "?";
       return `
         <div class="route-item">
           <div class="route-codes">${ap.id} <span class="arrow">${direction}</span> ${other}</div>
           <div class="route-meta">
-            <span class="plane-pill tier-${r.tier}">${planeByTier(r.tier).code}</span>
+            <span class="plane-pill tier-${tier}">${code}</span>
             <span class="route-income">${income > 0 ? fmtMoney(income) + "/s" : "out of range"}</span>
           </div>
           <div class="route-meta">
@@ -397,29 +514,39 @@
       <div class="panel-section">
         <h3>Buy aircraft</h3>
         <div class="plane-grid">
-          ${PLANE_TYPES.map(p => `
-            <div class="plane-card tier-${p.tier}">
-              <div class="plane-name">${p.name}</div>
-              <div class="plane-meta">${p.blurb}</div>
-              <div class="plane-cost">${fmtMoney(p.cost)}</div>
-              <div class="kv"><span class="k">Range</span><span class="v">${fmtNum(p.range)} km</span></div>
-              <div class="kv"><span class="k">Rate / 1000km</span><span class="v">${fmtMoney(p.baseRate)}/s</span></div>
-              <div class="kv"><span class="k">Owned</span><span class="v">${state.fleet[p.tier]}</span></div>
-              <button class="btn primary" style="width:100%; margin-top:8px;" data-action="buy-plane" data-tier="${p.tier}" ${state.cash >= p.cost ? "" : "disabled"}>Buy</button>
-            </div>
-          `).join("")}
+          ${PLANE_TYPES.map(p => {
+            const variant = PLANE_DATA.cheapestVariantForTier(p.tier);
+            const cost = variant ? variant.cost : 0;
+            const range = variant ? variant.rangeKm : 0;
+            const owned = planesByTier(p.tier).length;
+            return `
+              <div class="plane-card tier-${p.tier}">
+                <div class="plane-name">${variant ? variant.name : p.name}</div>
+                <div class="plane-meta">${p.blurb}</div>
+                <div class="plane-cost">${fmtMoney(cost)}</div>
+                <div class="kv"><span class="k">Range</span><span class="v">${fmtNum(range)} km</span></div>
+                <div class="kv"><span class="k">Rate / 1000km</span><span class="v">${fmtMoney(p.baseRate)}/s</span></div>
+                <div class="kv"><span class="k">Owned</span><span class="v">${owned}</span></div>
+                <button class="btn primary" style="width:100%; margin-top:8px;" data-action="buy-plane" data-tier="${p.tier}" ${state.cash >= cost ? "" : "disabled"}>Buy</button>
+              </div>
+            `;
+          }).join("")}
         </div>
       </div>
       <div class="panel-section">
         <h3>Sell aircraft (50% refund)</h3>
         <div class="plane-grid">
-          ${PLANE_TYPES.map(p => `
-            <div class="plane-card tier-${p.tier}">
-              <div class="plane-name">${p.name}</div>
-              <div class="plane-meta">Owned: ${state.fleet[p.tier]}</div>
-              <button class="btn" style="width:100%; margin-top:8px;" data-action="sell-plane" data-tier="${p.tier}" ${state.fleet[p.tier] > 0 ? "" : "disabled"}>Sell 1</button>
-            </div>
-          `).join("")}
+          ${PLANE_TYPES.map(p => {
+            const variant = PLANE_DATA.cheapestVariantForTier(p.tier);
+            const owned = planesByTier(p.tier).length;
+            return `
+              <div class="plane-card tier-${p.tier}">
+                <div class="plane-name">${variant ? variant.name : p.name}</div>
+                <div class="plane-meta">Owned: ${owned}</div>
+                <button class="btn" style="width:100%; margin-top:8px;" data-action="sell-plane" data-tier="${p.tier}" ${owned > 0 ? "" : "disabled"}>Sell 1</button>
+              </div>
+            `;
+          }).join("")}
         </div>
       </div>
     `;
@@ -440,11 +567,15 @@
             const a = airportById.get(r.from);
             const b = airportById.get(r.to);
             const income = routeIncome(r);
+            const plane = routePlane(r);
+            const variant = plane ? PLANE_DATA.variantById(plane.variantId) : null;
+            const tier = variant ? variant.tier : 1;
+            const code = variant ? variant.name : "?";
             return `
               <div class="route-item">
                 <div class="route-codes">${r.from} <span class="arrow">→</span> ${r.to}</div>
                 <div class="route-meta">
-                  <span class="plane-pill tier-${r.tier}">${planeByTier(r.tier).code}</span>
+                  <span class="plane-pill tier-${tier}">${code}</span>
                   <span class="route-income">${income > 0 ? fmtMoney(income) + "/s" : "out of range"}</span>
                 </div>
                 <div class="route-meta">
@@ -476,9 +607,11 @@
       </div>
       <div class="panel-section">
         <h3>Fleet</h3>
-        ${PLANE_TYPES.map(p => `
-          <div class="kv"><span class="k">${p.name}</span><span class="v">${state.fleet[p.tier]}</span></div>
-        `).join("")}
+        ${PLANE_TYPES.map(p => {
+          const variant = PLANE_DATA.cheapestVariantForTier(p.tier);
+          const owned = planesByTier(p.tier).length;
+          return `<div class="kv"><span class="k">${variant ? variant.name : p.name}</span><span class="v">${owned}</span></div>`;
+        }).join("")}
       </div>
       <div class="panel-section">
         <h3>Network</h3>
@@ -599,9 +732,11 @@
     function renderTierButtons() {
       const container = $("tier-buttons");
       container.innerHTML = PLANE_TYPES.map(p => {
-        const canAfford = state.fleet[p.tier] > 0;
+        const variant = PLANE_DATA.cheapestVariantForTier(p.tier);
+        const owned = unassignedPlanesByTier(p.tier).length;
         const isSelected = pickedTier === p.tier;
-        return `<button class="btn ${isSelected ? "primary" : ""}" data-tier="${p.tier}" ${canAfford ? "" : "disabled"} style="margin:3px;">${p.name}${canAfford ? ` (${state.fleet[p.tier]})` : ""}</button>`;
+        const label = variant ? variant.name : p.name;
+        return `<button class="btn ${isSelected ? "primary" : ""}" data-tier="${p.tier}" ${owned > 0 ? "" : "disabled"} style="margin:3px;">${label}${owned > 0 ? ` (${owned})` : ""}</button>`;
       }).join("");
       container.querySelectorAll("[data-tier]").forEach(el => {
         el.addEventListener("click", () => {
@@ -616,13 +751,14 @@
       const preview = $("route-preview");
       if (pickedTo && pickedTier) {
         const km = haversineKm(fromAp, pickedTo);
-        const plane = planeByTier(pickedTier);
-        const inRange = km <= plane.range;
-        const income = inRange ? plane.baseRate * Math.max(0.2, km/1000) : 0;
+        const variant = PLANE_DATA.cheapestVariantForTier(pickedTier);
+        const tierBaseRate = { 1: 0.5, 2: 5, 3: 30, 4: 100 };
+        const inRange = variant ? km <= variant.rangeKm : false;
+        const income = inRange ? (tierBaseRate[pickedTier] || 0) * Math.max(0.2, km / 1000) : 0;
         preview.innerHTML = `
           <div class="kv"><span class="k">Distance</span><span class="v">${fmtNum(km)} km</span></div>
-          <div class="kv"><span class="k">Plane</span><span class="v">${plane.name}</span></div>
-          <div class="kv"><span class="k">Range</span><span class="v">${fmtNum(plane.range)} km</span></div>
+          <div class="kv"><span class="k">Plane</span><span class="v">${variant ? variant.name : "?"}</span></div>
+          <div class="kv"><span class="k">Range</span><span class="v">${variant ? fmtNum(variant.rangeKm) : "?"} km</span></div>
           <div class="kv"><span class="k">Income</span><span class="v" style="color:${inRange ? "var(--info)" : "var(--bad)"}">${inRange ? fmtMoney(income) + "/s" : "OUT OF RANGE"}</span></div>
         `;
       } else {
@@ -863,7 +999,7 @@
       setTimeout(() => toast("Welcome, CEO! Click an airport to start.", "good"), 500);
     }
     if (typeof window !== "undefined") {
-      window.__ifm = { map, state, get airports() { return airports; } };
+      window.__ifm = { map, state, get airports() { return airports; }, load, migrateV1ToV2, save };
     }
   }
 
