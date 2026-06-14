@@ -15,6 +15,7 @@
   ];
 
   const UNLOCK_MEDIUM_AT = 50000;
+  const UNLOCK_REALISTIC_AT = 5_000_000;
 
   const EVENT_TEMPLATES = [
     { type: "storm",          durationHours: 18,    demandMult: 0.40, appliesTo: "region",  baseProbPerGameHour: 0.040 },
@@ -495,6 +496,129 @@
     }
   }
 
+  const GAME_MODES = {
+    simplified: {
+      label: "Simplified",
+      color: "var(--text-dim)",
+      features: {
+        fuelMarket: false,
+        co2Trading: false,
+        personnelHiring: false,
+        maintenanceScheduling: false,
+        seatConfig: false,
+        marketingCampaigns: false,
+        alliances: false,
+      },
+    },
+    realistic: {
+      label: "Realistic",
+      color: "var(--accent)",
+      features: {
+        fuelMarket: true,
+        co2Trading: true,
+        personnelHiring: true,
+        maintenanceScheduling: true,
+        seatConfig: true,
+        marketingCampaigns: true,
+        alliances: true,
+      },
+    },
+  };
+
+  function modeConfig() {
+    return GAME_MODES[state.mode] || GAME_MODES.simplified;
+  }
+
+  function tryUnlockRealisticMode() {
+    if (state.realisticUnlocked) return false;
+    if (state.totalEarned < UNLOCK_REALISTIC_AT) return false;
+    openRealisticModePrompt();
+    return true;
+  }
+
+  function openRealisticModePrompt() {
+    const modal = $("modal");
+    const body = $("modal-body");
+    const title = $("modal-title");
+    title.textContent = "Realistic Mode Unlocked";
+    body.innerHTML = `
+      <p style="color:var(--text-dim); font-size:13px; line-height:1.6; margin:0 0 12px;">
+        You've earned <strong style="color:var(--accent)">${fmtMoney(UNLOCK_REALISTIC_AT)}</strong>.
+        A more detailed simulation is now available.
+      </p>
+      <p style="color:var(--text); font-size:13px; line-height:1.6; margin:0 0 12px;">
+        <strong>Realistic Mode</strong> adds:
+      </p>
+      <ul style="color:var(--text-dim); font-size:12px; line-height:1.7; margin:0 0 12px; padding-left:18px;">
+        <li>Fuel market with price volatility and inventory</li>
+        <li>CO2 emissions and trading</li>
+        <li>Pilots, cabin crew, ground crew hiring</li>
+        <li>Scheduled A-check / C-check maintenance</li>
+        <li>Economy / business / first class seat config</li>
+        <li>Marketing campaigns (coming soon)</li>
+        <li>Alliances (coming soon)</li>
+      </ul>
+      <p style="color:var(--bad); font-size:12px; line-height:1.5; margin:0 0 4px;">
+        This choice is <strong>irreversible</strong>. You can stay in Simplified Mode as long as you want.
+      </p>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+        <button class="btn ghost" id="modal-cancel">Stay Simplified</button>
+        <button class="btn primary" id="modal-confirm">Switch to Realistic</button>
+      </div>
+    `;
+    modal.classList.remove("hidden");
+    $("modal-cancel").addEventListener("click", closeModal);
+    $("modal-confirm").addEventListener("click", () => {
+      state.realisticUnlocked = true;
+      state.mode = "realistic";
+      toast("Switched to Realistic Mode — fuel, CO2, personnel live", "good");
+      save();
+      closeModal();
+      renderAll();
+    });
+  }
+
+  function openModeInfoModal() {
+    const modal = $("modal");
+    const body = $("modal-body");
+    const title = $("modal-title");
+    title.textContent = "Game Mode";
+    const cfg = modeConfig();
+    const featureRows = [
+      ["Fuel market", "fuelMarket"],
+      ["CO2 emissions & trading", "co2Trading"],
+      ["Personnel hiring", "personnelHiring"],
+      ["Scheduled maintenance", "maintenanceScheduling"],
+      ["Seat configuration", "seatConfig"],
+      ["Marketing campaigns", "marketingCampaigns"],
+      ["Alliances", "alliances"],
+    ].map(([label, key]) => {
+      const enabled = cfg.features[key];
+      return `<div class="kv"><span class="k">${label}</span><span class="v" style="color:${enabled ? "var(--good)" : "var(--text-faint)"}">${enabled ? "Enabled" : "Disabled"}</span></div>`;
+    }).join("");
+    const unlockHint = state.realisticUnlocked
+      ? `<p style="color:var(--text-dim); font-size:12px; margin:8px 0 0;">You are in <strong style="color:${cfg.color}">${cfg.label}</strong> mode.</p>`
+      : `<p style="color:var(--text-dim); font-size:12px; margin:8px 0 0;">
+          Unlock <strong style="color:var(--accent)">Realistic Mode</strong> at <strong>${fmtMoney(UNLOCK_REALISTIC_AT)}</strong> total earned
+          (currently ${fmtMoney(state.totalEarned)}, ${Math.min(100, (state.totalEarned/UNLOCK_REALISTIC_AT)*100).toFixed(1)}%).
+        </p>`;
+    body.innerHTML = `
+      <div class="panel-section">
+        <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">
+          <strong style="color:${cfg.color}">${cfg.label}</strong> — current simulation depth.
+        </p>
+        <h3>Features</h3>
+        ${featureRows}
+        ${unlockHint}
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button class="btn ghost" id="modal-cancel">Close</button>
+      </div>
+    `;
+    modal.classList.remove("hidden");
+    $("modal-cancel").addEventListener("click", closeModal);
+  }
+
   function currentFuelMult() {
     let m = 1;
     for (const e of state.events) {
@@ -713,6 +837,7 @@
         <h3>Goal</h3>
         <div class="kv"><span class="k">Build a global network</span><span class="v">∞</span></div>
         <div class="kv"><span class="k">Unlock regional airports</span><span class="v">${state.mediumAirportsUnlocked ? "✓" : fmtMoney(UNLOCK_MEDIUM_AT)}</span></div>
+        <div class="kv"><span class="k">Unlock Realistic mode</span><span class="v">${state.realisticUnlocked ? "✓" : fmtMoney(UNLOCK_REALISTIC_AT)}</span></div>
         <div class="kv"><span class="k">Current cash</span><span class="v">${fmtMoney(state.cash)}</span></div>
         <div class="kv"><span class="k">Income / sec</span><span class="v">${fmtMoney(totalIncomePerSec())}</span></div>
       </div>
@@ -1230,6 +1355,15 @@
       badge.textContent = String(n);
       badge.hidden = n === 0;
     }
+    const pill = $("mode-pill");
+    if (pill) {
+      const cfg = modeConfig();
+      pill.textContent = cfg.label;
+      pill.style.color = cfg.color;
+      pill.title = state.mode === "realistic"
+        ? "Realistic mode: full simulation (fuel, CO2, personnel, maintenance)"
+        : "Simplified mode: basic economy. Unlock Realistic at " + fmtMoney(UNLOCK_REALISTIC_AT) + " total earned.";
+    }
   }
 
   function renderAll() {
@@ -1312,6 +1446,7 @@
     applyEventTick(dtGameHours);
     applyReputationDrift(dtSec);
     tryUnlockMediumAirports();
+    tryUnlockRealisticMode();
     renderTopBar();
     if (["hangar", "stats", "routes", "events"].includes(panelMode)) renderPanel();
   }
@@ -1322,6 +1457,7 @@
     $("btn-events").addEventListener("click", () => showPanel("events"));
     $("btn-stats").addEventListener("click", () => showPanel("stats"));
     $("btn-save").addEventListener("click", () => { save(); toast("Game saved", "good"); });
+    $("mode-pill").addEventListener("click", openModeInfoModal);
     $("panel-close").addEventListener("click", hidePanel);
     $("modal-close").addEventListener("click", closeModal);
     $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
@@ -1377,6 +1513,8 @@
         routeEconomyCalc, simulateRoute, routeIncome, totalIncomePerSec,
         EVENT_TEMPLATES, EVENT_LABELS, EVENT_ICONS, EVENT_COLORS,
         createEvent, applyEventTick, currentFuelPrice, currentFuelMult,
+        GAME_MODES, modeConfig, tryUnlockRealisticMode, openModeInfoModal,
+        openRealisticModePrompt, renderTopBar,
       };
     }
   }
