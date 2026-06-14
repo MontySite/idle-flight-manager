@@ -15,6 +15,44 @@
   ];
 
   const UNLOCK_MEDIUM_AT = 50000;
+
+  const EVENT_TEMPLATES = [
+    { type: "storm",          durationHours: 18,    demandMult: 0.40, appliesTo: "region",  baseProbPerGameHour: 0.040 },
+    { type: "strike",         durationHours: 48,    demandMult: 0.00, appliesTo: "airport", baseProbPerGameHour: 0.010 },
+    { type: "oil_shock",      durationHours: 720,   fuelMult: 1.60,    demandMult: 0.85, appliesTo: "global", baseProbPerGameHour: 0.003 },
+    { type: "pandemic",       durationHours: 1440,  demandMult: 0.20, appliesTo: "global", baseProbPerGameHour: 0.0008 },
+    { type: "festival",       durationHours: 72,    demandMult: 1.50, appliesTo: "airport", baseProbPerGameHour: 0.020 },
+    { type: "security_alert", durationHours: 6,     demandMult: 0.50, appliesTo: "airport", baseProbPerGameHour: 0.005 },
+  ];
+
+  const EVENT_LABELS = {
+    storm: "Storm",
+    strike: "Strike",
+    oil_shock: "Oil Shock",
+    pandemic: "Pandemic",
+    festival: "Festival",
+    security_alert: "Security Alert",
+  };
+
+  const EVENT_ICONS = {
+    storm: "\u26C8",
+    strike: "\u2696",
+    oil_shock: "\u26FD",
+    pandemic: "\u2623",
+    festival: "\u2728",
+    security_alert: "\u26A0",
+  };
+
+  const EVENT_COLORS = {
+    storm: "#38bdf8",
+    strike: "#f97316",
+    oil_shock: "#ef4444",
+    pandemic: "#a78bfa",
+    festival: "#f5b800",
+    security_alert: "#fb923c",
+  };
+
+  const EVENT_TICK_HOURS_BUDGET_PER_TICK = 1;
   const STARTING_CASH = 10000;
 
   const PRINCIPAL_AIRPORTS = new Set([
@@ -160,7 +198,7 @@
     const revenuePerFlight = paxPerFlight * farePerPax;
     const revenuePerSec = flightsPerSec * revenuePerFlight;
 
-    const fuel = km * variant.fuelKgPerKm * ECON_DATA.ECON.fuelPriceUsdPerKg;
+    const fuel = km * variant.fuelKgPerKm * currentFuelPrice();
     const nav = km * ECON_DATA.ECON.navFeeUsdPerKm;
     const crew = (km / variant.cruiseKmh) * ECON_DATA.ECON.crewUsdPerHour[variant.tier];
     const ageMult = 1.5 - plane.health / 100;
@@ -275,6 +313,7 @@
       if (typeof state.reputation !== "number") state.reputation = 1.0;
       if (!state.personnel) state.personnel = { pilots: 0, cabinCrew: 0, groundCrew: 0 };
       if (!Array.isArray(state.events)) state.events = [];
+      if (typeof state.nextEventId !== "number") state.nextEventId = 1;
       if (!state.stats) state.stats = { paxCarried: 0, flightsDone: 0 };
       for (const r of state.routes) {
         if (typeof r.tier !== "undefined" && !r.planeId) r.tier = r.tier;
@@ -456,6 +495,80 @@
     }
   }
 
+  function currentFuelMult() {
+    let m = 1;
+    for (const e of state.events) {
+      if (e.fuelMult && e.fuelMult > 1) m = Math.max(m, e.fuelMult);
+    }
+    return m;
+  }
+
+  function currentFuelPrice() {
+    return ECON_DATA.ECON.fuelPriceUsdPerKg * currentFuelMult();
+  }
+
+  function pickEventTarget(tmpl) {
+    if (tmpl.appliesTo === "global") return {};
+    if (tmpl.appliesTo === "region") {
+      const groups = ECON_DATA.REGION_GROUPS;
+      const g = groups[Math.floor(Math.random() * groups.length)];
+      return { region: g.code };
+    }
+    if (tmpl.appliesTo === "airport") {
+      const pool = new Set();
+      for (const r of state.routes) { pool.add(r.from); pool.add(r.to); }
+      let list = [...pool].map(id => airportById.get(id)).filter(Boolean);
+      if (list.length === 0) list = airports;
+      const ap = list[Math.floor(Math.random() * list.length)];
+      return { airportId: ap.id, airportName: ap.name || ap.id };
+    }
+    return {};
+  }
+
+  function createEvent(tmpl) {
+    return {
+      id: (state.nextEventId = (state.nextEventId || 1)),
+      type: tmpl.type,
+      durationHours: tmpl.durationHours,
+      hoursRemaining: tmpl.durationHours,
+      demandMult: tmpl.demandMult ?? 1.0,
+      fuelMult: tmpl.fuelMult ?? 1.0,
+      appliesTo: tmpl.appliesTo,
+      startedAt: state.gameTimeHours,
+      ...pickEventTarget(tmpl),
+    };
+  }
+
+  function hasActiveEventOfType(type) {
+    return state.events.some(e => e.type === type);
+  }
+
+  function applyEventTick(dtGameHours) {
+    for (const tmpl of EVENT_TEMPLATES) {
+      const p = tmpl.baseProbPerGameHour * dtGameHours;
+      if (Math.random() < p) {
+        if (tmpl.type === "oil_shock" && hasActiveEventOfType("oil_shock")) continue;
+        if (hasActiveEventOfType(tmpl.type) && (tmpl.type === "pandemic" || tmpl.type === "festival" || tmpl.type === "strike" || tmpl.type === "security_alert" || tmpl.type === "storm")) continue;
+        const ev = createEvent(tmpl);
+        if (ev) {
+          state.events.push(ev);
+          const label = EVENT_LABELS[ev.type] || ev.type;
+          const target = ev.region || ev.airportId || "the world";
+          const kind = (ev.demandMult ?? 1) < 1 ? "warn" : "good";
+          toast(`${label} affecting ${target} (${Math.round(ev.hoursRemaining)}h)`, kind);
+        }
+      }
+    }
+    for (let i = state.events.length - 1; i >= 0; i--) {
+      state.events[i].hoursRemaining -= dtGameHours;
+      if (state.events[i].hoursRemaining <= 0) {
+        const removed = state.events.splice(i, 1)[0];
+        const label = EVENT_LABELS[removed.type] || removed.type;
+        toast(`${label} ended`, "good");
+      }
+    }
+  }
+
   function toast(msg, kind) {
     const el = document.createElement("div");
     el.className = "toast" + (kind ? " " + kind : "");
@@ -508,8 +621,80 @@
       bodyEl.innerHTML = renderStatsPanel();
       return;
     }
+    if (panelMode === "events") {
+      titleEl.textContent = "Events";
+      bodyEl.innerHTML = renderEventsPanel();
+      return;
+    }
     titleEl.textContent = "Welcome, CEO";
     bodyEl.innerHTML = renderWelcomePanel();
+  }
+
+  function eventTargetLabel(ev) {
+    if (ev.appliesTo === "global") return "Global";
+    if (ev.appliesTo === "region") return `Region ${ev.region}`;
+    if (ev.appliesTo === "airport") {
+      const ap = ev.airportId ? airportById.get(ev.airportId) : null;
+      return ap ? `${ev.airportId} (${ap.name || ap.id})` : ev.airportId;
+    }
+    return "—";
+  }
+
+  function renderEventsPanel() {
+    const active = [...state.events].sort((a, b) => a.hoursRemaining - b.hoursRemaining);
+    const fuelMult = currentFuelMult();
+    const fuelPrice = currentFuelPrice();
+    const basePrice = ECON_DATA.ECON.fuelPriceUsdPerKg;
+    return `
+      <div class="panel-section">
+        <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">
+          Random world events affect demand, fuel prices, and operations.
+        </p>
+        <div class="kv"><span class="k">Fuel price</span><span class="v" style="color:${fuelMult > 1.05 ? "var(--bad)" : fuelMult < 0.95 ? "var(--good)" : "var(--text)"}">${fmtMoney(fuelPrice)}/kg</span></div>
+        <div class="kv"><span class="k">Fuel multiplier</span><span class="v">${fuelMult.toFixed(2)}×</span></div>
+      </div>
+      <div class="panel-section">
+        <h3>Active events (${active.length})</h3>
+        ${active.length === 0 ? `<div class="empty">No active events.</div>` : active.map(ev => {
+          const label = EVENT_LABELS[ev.type] || ev.type;
+          const icon = EVENT_ICONS[ev.type] || "";
+          const color = EVENT_COLORS[ev.type] || "var(--text-dim)";
+          const dm = ev.demandMult ?? 1.0;
+          const fm = ev.fuelMult ?? 1.0;
+          const total = ev.durationHours;
+          const remaining = ev.hoursRemaining;
+          const pct = Math.max(0, Math.min(100, ((total - remaining) / total) * 100));
+          const target = eventTargetLabel(ev);
+          return `
+            <div class="event-card" style="border-left-color:${color};">
+              <div class="event-header">
+                <span class="event-icon" style="color:${color};">${icon}</span>
+                <span class="event-label">${label}</span>
+                <span class="event-target">${target}</span>
+              </div>
+              <div class="event-progress">
+                <div class="event-progress-fill" style="width:${pct}%; background:${color};"></div>
+              </div>
+              <div class="event-meta">
+                <span>${remaining > 0 ? Math.round(remaining) + "h left" : "ending"}</span>
+                <span>demand ${dm.toFixed(2)}×${fm > 1 ? ` · fuel ${fm.toFixed(2)}×` : ""}</span>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+      <div class="panel-section">
+        <h3>Event types</h3>
+        ${EVENT_TEMPLATES.map(t => `
+          <div class="kv">
+            <span class="k">${EVENT_ICONS[t.type] || ""} ${EVENT_LABELS[t.type] || t.type}</span>
+            <span class="v" style="color:var(--text-faint); font-size:11px;">
+              ${t.appliesTo} · ${Math.round(t.durationHours)}h · demand ${(t.demandMult ?? 1).toFixed(2)}×${t.fuelMult ? ` · fuel ${t.fuelMult.toFixed(2)}×` : ""}
+            </span>
+          </div>
+        `).join("")}
+      </div>
+    `;
   }
 
   function renderWelcomePanel() {
@@ -1039,6 +1224,12 @@
     $("stat-income").textContent = fmtMoney(totalIncomePerSec());
     $("stat-routes").textContent = state.routes.length;
     $("stat-fleet").textContent = fleetSize();
+    const badge = $("badge-events");
+    if (badge) {
+      const n = state.events.length;
+      badge.textContent = String(n);
+      badge.hidden = n === 0;
+    }
   }
 
   function renderAll() {
@@ -1115,17 +1306,20 @@
 
   function tick() {
     const dtSec = TICK_MS / 1000;
-    state.gameTimeHours += dtSec * ECON_DATA.ECON.gameSecondsPerGameHour;
+    const dtGameHours = dtSec * ECON_DATA.ECON.gameSecondsPerGameHour;
+    state.gameTimeHours += dtGameHours;
     for (const r of state.routes) simulateRoute(r, dtSec);
+    applyEventTick(dtGameHours);
     applyReputationDrift(dtSec);
     tryUnlockMediumAirports();
     renderTopBar();
-    if (panelMode === "hangar" || panelMode === "stats" || panelMode === "routes") renderPanel();
+    if (["hangar", "stats", "routes", "events"].includes(panelMode)) renderPanel();
   }
 
   function bindTopBar() {
     $("btn-hangar").addEventListener("click", () => showPanel("hangar"));
     $("btn-routes").addEventListener("click", () => showPanel("routes"));
+    $("btn-events").addEventListener("click", () => showPanel("events"));
     $("btn-stats").addEventListener("click", () => showPanel("stats"));
     $("btn-save").addEventListener("click", () => { save(); toast("Game saved", "good"); });
     $("panel-close").addEventListener("click", hidePanel);
@@ -1177,7 +1371,13 @@
       setTimeout(() => toast("Welcome, CEO! Click an airport to start.", "good"), 500);
     }
     if (typeof window !== "undefined") {
-      window.__ifm = { map, state, get airports() { return airports; }, load, migrateV1ToV2, save, routeEconomyCalc, simulateRoute, routeIncome, totalIncomePerSec };
+      window.__ifm = {
+        map, state, get airports() { return airports; },
+        load, migrateV1ToV2, save,
+        routeEconomyCalc, simulateRoute, routeIncome, totalIncomePerSec,
+        EVENT_TEMPLATES, EVENT_LABELS, EVENT_ICONS, EVENT_COLORS,
+        createEvent, applyEventTick, currentFuelPrice, currentFuelMult,
+      };
     }
   }
 
