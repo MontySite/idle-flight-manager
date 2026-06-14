@@ -522,6 +522,173 @@ button {
 }
 
 /* ================================
+   Hangar (brand / variant)
+   ================================ */
+.hangar-brands {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.brand-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.brand-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--line-soft);
+  transition: color 100ms;
+}
+.brand-header:hover { color: var(--accent); }
+.brand-caret {
+  display: inline-block;
+  width: 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+  transition: transform 120ms;
+}
+.brand-name {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  flex: 1;
+}
+.brand-count {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.brand-variants {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.brand-section.collapsed .brand-variants { display: none; }
+
+.variant-card {
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--bg-3);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.variant-card.tier-1 { border-left-color: var(--plane-1); }
+.variant-card.tier-2 { border-left-color: var(--plane-2); }
+.variant-card.tier-3 { border-left-color: var(--plane-3); }
+.variant-card.tier-4 { border-left-color: var(--plane-4); }
+.variant-card.locked { opacity: 0.6; background: var(--bg-1); }
+.variant-card.next-unlock {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, var(--accent-soft) 0%, var(--bg-2) 50%);
+  opacity: 1;
+  position: relative;
+}
+.variant-card.next-unlock::after {
+  content: "NEXT UNLOCK";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  background: var(--bg-1);
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--accent);
+}
+.variant-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.variant-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  flex: 1;
+}
+.variant-tier {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: "JetBrains Mono", monospace;
+  letter-spacing: 0.04em;
+}
+.variant-tier.tier-1 { background: #9ca3af33; color: var(--plane-1); }
+.variant-tier.tier-2 { background: #38bdf833; color: var(--plane-2); }
+.variant-tier.tier-3 { background: #a78bfa33; color: var(--plane-3); }
+.variant-tier.tier-4 { background: #f472b633; color: var(--plane-4); }
+.variant-owned {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  min-width: 20px;
+  text-align: right;
+}
+.variant-card.locked .variant-owned { color: var(--text-faint); }
+.variant-specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+.variant-cost {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+.variant-card.locked .variant-cost { color: var(--text-faint); }
+.variant-progress {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  background: var(--bg-3);
+  border-radius: 4px;
+  border-left: 2px solid var(--accent);
+}
+.variant-card.next-unlock .variant-progress {
+  color: var(--text);
+  background: rgba(245, 184, 0, 0.1);
+  border-left-color: var(--accent);
+}
+.variant-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.variant-actions .btn {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+.next-unlock-banner {
+  background: linear-gradient(135deg, var(--accent-soft) 0%, var(--bg-2) 100%);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-top: 4px;
+}
+
+/* ================================
    Leaflet popup overrides
    ================================ */
 .leaflet-popup-content-wrapper {

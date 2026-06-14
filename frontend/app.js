@@ -268,10 +268,14 @@
     toast(`Welcome back! You earned ${fmtMoney(earned)} over ${hrs}h offline.`, "good");
   }
 
-  function buyPlane(tier) {
-    const variant = PLANE_DATA.cheapestVariantForTier(tier);
-    if (!variant) { toast(`No tier ${tier} plane available`, "bad"); return; }
-    if (!PLANE_DATA.canPurchaseVariant(variant.id, state.planes)) {
+  function canPurchase(variantId) {
+    return PLANE_DATA.canPurchaseVariant(variantId, state.planes);
+  }
+
+  function buyPlane(variantId) {
+    const variant = PLANE_DATA.variantById(variantId);
+    if (!variant) { toast("Unknown plane", "bad"); return; }
+    if (!canPurchase(variantId)) {
       toast(`${variant.name} is not yet unlocked`, "bad");
       return;
     }
@@ -282,7 +286,7 @@
     state.cash -= variant.cost;
     const plane = {
       id: state.nextPlaneId++,
-      variantId: variant.id,
+      variantId,
       ageHours: 0,
       health: 100,
       seatConfig: { economy: 0.80, business: 0.15, first: 0.05 },
@@ -294,10 +298,14 @@
     renderAll();
   }
 
-  function sellPlane(tier) {
-    const plane = unassignedPlanesByTier(tier)[0];
-    if (!plane) return;
-    const variant = PLANE_DATA.variantById(plane.variantId);
+  function sellPlane(variantId) {
+    const variant = PLANE_DATA.variantById(variantId);
+    if (!variant) return;
+    const plane = state.planes.find(p => p.variantId === variantId && !p.assignedRouteId);
+    if (!plane) {
+      toast(`No unassigned ${variant.name} to sell`, "warn");
+      return;
+    }
     const refund = Math.floor(variant.cost * 0.5);
     state.planes = state.planes.filter(p => p.id !== plane.id);
     state.cash += refund;
@@ -502,52 +510,98 @@
     }).join("") + `</div>`;
   }
 
+  function isNextToUnlock(variant) {
+    if (!variant.unlockBy) return false;
+    if (canPurchase(variant.id)) return false;
+    const owned = PLANE_DATA.ownedCount(state.planes, variant.unlockBy.prev);
+    return (variant.unlockBy.count - owned) === 1;
+  }
+
+  function variantProgressText(variant) {
+    if (!variant.unlockBy) return null;
+    const req = variant.unlockBy;
+    if (req.brand) {
+      const prevV = PLANE_DATA.variantById(req.prev);
+      const owned = state.planes.filter(p => p.variantId === req.prev).length;
+      const label = prevV ? prevV.name : req.prev;
+      return `Own ${req.count}× ${label} of ${req.brand} (have ${owned})`;
+    }
+    const owned = PLANE_DATA.ownedCount(state.planes, req.prev);
+    const prevV = PLANE_DATA.variantById(req.prev);
+    const label = prevV ? prevV.name : req.prev;
+    return `Own ${req.count}× ${label} (have ${owned})`;
+  }
+
+  function renderVariantCard(v) {
+    const owned = state.planes.filter(p => p.variantId === v.id).length;
+    const unassigned = state.planes.filter(p => p.variantId === v.id && !p.assignedRouteId).length;
+    const unlocked = canPurchase(v.id);
+    const next = isNextToUnlock(v);
+    const canBuy = unlocked && state.cash >= v.cost;
+    const canSell = unassigned > 0;
+    const progress = unlocked ? null : variantProgressText(v);
+    return `
+      <div class="variant-card tier-${v.tier} ${unlocked ? "" : "locked"} ${next ? "next-unlock" : ""}">
+        <div class="variant-header">
+          <span class="variant-name">${v.name}</span>
+          <span class="variant-tier tier-${v.tier}">T${v.tier}</span>
+          <span class="variant-owned" title="Owned">${owned}</span>
+        </div>
+        <div class="variant-specs">
+          <span>${v.seats} seats</span>
+          <span>${fmtNum(v.rangeKm)} km</span>
+          <span>${v.cruiseKmh} kph</span>
+          <span>${v.fuelKgPerKm} kg/km</span>
+        </div>
+        <div class="variant-cost">${fmtMoney(v.cost)}</div>
+        ${progress ? `<div class="variant-progress">${progress}</div>` : ""}
+        <div class="variant-actions">
+          <button class="btn primary" data-action="buy-variant" data-variant="${v.id}" ${canBuy ? "" : "disabled"}>Buy</button>
+          <button class="btn" data-action="sell-variant" data-variant="${v.id}" ${canSell ? "" : "disabled"}>Sell 1</button>
+        </div>
+      </div>
+    `;
+  }
+
   function renderHangarPanel() {
     const fleetTotal = fleetSize();
+    const nextUnlock = PLANE_DATA.PLANE_FAMILIES
+      .flatMap(f => f.variants)
+      .filter(v => isNextToUnlock(v))[0] || null;
+    const brandsHtml = PLANE_DATA.PLANE_FAMILIES.map(f => {
+      const ownedInBrand = state.planes.filter(p => {
+        const v = PLANE_DATA.variantById(p.variantId);
+        return v && v.brand === f.brand;
+      }).length;
+      const totalInBrand = f.variants.length;
+      const variantsHtml = f.variants.map(renderVariantCard).join("");
+      return `
+        <div class="brand-section" data-brand="${f.brand}">
+          <div class="brand-header" data-action="toggle-brand" data-brand="${f.brand}">
+            <span class="brand-caret">▾</span>
+            <span class="brand-name">${f.brand}</span>
+            <span class="brand-count">${ownedInBrand} / ${totalInBrand}</span>
+          </div>
+          <div class="brand-variants">${variantsHtml}</div>
+        </div>
+      `;
+    }).join("");
     return `
       <div class="panel-section">
         <p style="color:var(--text-dim); font-size:12px; margin:0 0 8px;">
-          You own <strong style="color:var(--text)">${fleetTotal}</strong> aircraft.
-          Assign one to a route to start earning.
+          You own <strong style="color:var(--text)">${fleetTotal}</strong> aircraft across
+          <strong style="color:var(--text)">${PLANE_DATA.PLANE_FAMILIES.filter(f => state.planes.some(p => PLANE_DATA.variantById(p.variantId)?.brand === f.brand)).length}</strong> brand${fleetTotal === 1 ? "" : "s"}.
         </p>
+        ${nextUnlock ? `
+          <div class="next-unlock-banner">
+            <span style="color:var(--text-faint); font-size:10px; letter-spacing:0.1em; text-transform:uppercase;">Next unlock</span>
+            <div style="color:var(--text); font-weight:700; margin-top:2px;">${nextUnlock.name}</div>
+            <div style="color:var(--text-dim); font-size:11px; margin-top:2px;">${variantProgressText(nextUnlock)}</div>
+          </div>
+        ` : ""}
       </div>
       <div class="panel-section">
-        <h3>Buy aircraft</h3>
-        <div class="plane-grid">
-          ${PLANE_TYPES.map(p => {
-            const variant = PLANE_DATA.cheapestVariantForTier(p.tier);
-            const cost = variant ? variant.cost : 0;
-            const range = variant ? variant.rangeKm : 0;
-            const owned = planesByTier(p.tier).length;
-            return `
-              <div class="plane-card tier-${p.tier}">
-                <div class="plane-name">${variant ? variant.name : p.name}</div>
-                <div class="plane-meta">${p.blurb}</div>
-                <div class="plane-cost">${fmtMoney(cost)}</div>
-                <div class="kv"><span class="k">Range</span><span class="v">${fmtNum(range)} km</span></div>
-                <div class="kv"><span class="k">Rate / 1000km</span><span class="v">${fmtMoney(p.baseRate)}/s</span></div>
-                <div class="kv"><span class="k">Owned</span><span class="v">${owned}</span></div>
-                <button class="btn primary" style="width:100%; margin-top:8px;" data-action="buy-plane" data-tier="${p.tier}" ${state.cash >= cost ? "" : "disabled"}>Buy</button>
-              </div>
-            `;
-          }).join("")}
-        </div>
-      </div>
-      <div class="panel-section">
-        <h3>Sell aircraft (50% refund)</h3>
-        <div class="plane-grid">
-          ${PLANE_TYPES.map(p => {
-            const variant = PLANE_DATA.cheapestVariantForTier(p.tier);
-            const owned = planesByTier(p.tier).length;
-            return `
-              <div class="plane-card tier-${p.tier}">
-                <div class="plane-name">${variant ? variant.name : p.name}</div>
-                <div class="plane-meta">Owned: ${owned}</div>
-                <button class="btn" style="width:100%; margin-top:8px;" data-action="sell-plane" data-tier="${p.tier}" ${owned > 0 ? "" : "disabled"}>Sell 1</button>
-              </div>
-            `;
-          }).join("")}
-        </div>
+        <div class="hangar-brands">${brandsHtml}</div>
       </div>
     `;
   }
@@ -650,11 +704,23 @@
   function bindHangarPanelEvents() {
     const body = $("panel-body");
     body.querySelectorAll("[data-action]").forEach(el => {
-      el.addEventListener("click", () => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
         const action = el.getAttribute("data-action");
-        const tier = parseInt(el.getAttribute("data-tier"), 10);
-        if (action === "buy-plane") buyPlane(tier);
-        if (action === "sell-plane") sellPlane(tier);
+        if (action === "buy-variant") {
+          const variantId = el.getAttribute("data-variant");
+          buyPlane(variantId);
+        } else if (action === "sell-variant") {
+          const variantId = el.getAttribute("data-variant");
+          sellPlane(variantId);
+        } else if (action === "toggle-brand") {
+          const brand = el.getAttribute("data-brand");
+          const section = body.querySelector(`.brand-section[data-brand="${brand}"]`);
+          if (!section) return;
+          section.classList.toggle("collapsed");
+          const caret = el.querySelector(".brand-caret");
+          if (caret) caret.textContent = section.classList.contains("collapsed") ? "▸" : "▾";
+        }
       });
     });
     body.querySelectorAll("[data-action='open-hangar']").forEach(el => {

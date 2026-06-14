@@ -180,3 +180,6 @@ Evoluzione dell'attuale Idle Flight Manager (browser, Flask + Leaflet) in un ges
 - Se l'utente vuole A o C invece di B per il mode toggle, riconciliare F5.t3
 - Se l'utente vuole più brand (es. Sukhoi, Comac, Mitsubishi SpaceJet), aggiungere a PLANE_FAMILIES
 - Se l'utente vuole cargo in MVP, riconciliare out-of-scope e aggiungere task
+
+## NOTE
+Alla fine di ogni sessione bisogna fare un commit con il nuovo PLAN.md, così che sia facile vedere le modifiche.
